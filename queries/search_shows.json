@@ -1,0 +1,13 @@
+{
+  "query": {
+    "multi_match": {
+      "query": "{{keyword}}",
+      "fields": [
+        "title^3",
+        "author"
+      ]
+    }
+  },
+  "from": "{{from}}",
+  "size": "{{size}}"
+}

@@ -1,0 +1,23 @@
+{
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "multi_match": {
+            "query": "{{keyword}}",
+            "fields": [
+              "title^2",
+              "description"
+            ],
+            "type": "best_fields"
+          }
+        }
+      ]
+    }
+  },
+  "sort": [
+    { "pub_date": "desc" }
+  ],
+  "from": "{{from}}",
+  "size": "{{size}}"
+}
