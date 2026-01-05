@@ -1,0 +1,26 @@
+{
+  "mappings": {
+    "properties": {
+      "show_id": {
+        "type": "keyword"
+      },
+      "title": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "description": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+      "pub_date": {
+        "type": "date"
+      }
+    }
+  }
+}
