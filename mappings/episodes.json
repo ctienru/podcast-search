@@ -1,6 +1,13 @@
 {
   "settings": {
     "analysis": {
+      "filter": {
+        "edge_ngram_filter": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 20
+        }
+      },
       "analyzer": {
         "autocomplete_analyzer": {
           "type": "custom",
@@ -12,21 +19,41 @@
           "tokenizer": "standard",
           "filter": ["lowercase"]
         }
-      },
-      "filter": {
-        "edge_ngram_filter": {
-          "type": "edge_ngram",
-          "min_gram": 2,
-          "max_gram": 20
-        }
       }
     }
   },
   "mappings": {
+    "dynamic": "strict",
+    "dynamic_templates": [
+      {
+        "external_ids_keywords": {
+          "path_match": "external_ids.*",
+          "mapping": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      {
+        "podcast_external_ids_keywords": {
+          "path_match": "podcast.external_ids.*",
+          "mapping": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      }
+    ],
     "properties": {
-      "id": {
+      "episode_id": {
         "type": "keyword"
       },
+
+      "external_ids": {
+        "type": "object",
+        "dynamic": true
+      },
+
       "title": {
         "type": "text",
         "analyzer": "standard",
@@ -42,17 +69,77 @@
           }
         }
       },
-      "author": {
+
+      "description": {
         "type": "text",
-        "fields": {
-          "keyword": {
+        "analyzer": "standard"
+      },
+
+      "language": {
+        "type": "keyword"
+      },
+
+      "published_at": {
+        "type": "date"
+      },
+
+      "duration_sec": {
+        "type": "integer"
+      },
+
+      "image_url": {
+        "type": "keyword",
+        "index": false
+      },
+
+      "podcast": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "podcast_id": {
+            "type": "keyword"
+          },
+
+          "external_ids": {
+            "type": "object",
+            "dynamic": true
+          },
+
+          "title": {
+            "type": "text",
+            "analyzer": "standard",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+
+          "publisher": {
+            "type": "text",
+            "analyzer": "standard",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+
+          "image_url": {
             "type": "keyword",
-            "ignore_above": 256
+            "index": false
           }
         }
       },
-      "region": {
-        "type": "keyword"
+
+      "created_at": {
+        "type": "date"
+      },
+
+      "updated_at": {
+        "type": "date"
       }
     }
   }

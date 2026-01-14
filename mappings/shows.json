@@ -1,9 +1,27 @@
 {
   "mappings": {
+    "dynamic": "strict",
+    "dynamic_templates": [
+      {
+        "external_ids_keywords": {
+          "path_match": "external_ids.*",
+          "mapping": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      }
+    ],
     "properties": {
-      "show_id": {
+      "podcast_id": {
         "type": "keyword"
       },
+
+      "external_ids": {
+        "type": "object",
+        "dynamic": true
+      },
+
       "title": {
         "type": "text",
         "analyzer": "standard",
@@ -14,11 +32,45 @@
           }
         }
       },
+
       "description": {
         "type": "text",
         "analyzer": "standard"
       },
-      "pub_date": {
+
+      "publisher": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+
+      "language": {
+        "type": "keyword"
+      },
+
+      "episode_count": {
+        "type": "integer"
+      },
+
+      "popularity_score": {
+        "type": "float"
+      },
+
+      "image_url": {
+        "type": "keyword",
+        "index": false
+      },
+
+      "created_at": {
+        "type": "date"
+      },
+
+      "updated_at": {
         "type": "date"
       }
     }
