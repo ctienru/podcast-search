@@ -1,4 +1,6 @@
 import logging
+
+from elastic_transport import HeadApiResponse
 from elasticsearch import Elasticsearch
 
 from src.config.settings import ES_HOST
@@ -35,3 +37,14 @@ class ElasticsearchService:
 
     def delete_index(self, index: str) -> None:
         self.client.indices.delete(index=index)
+
+    def document_exists(self, index: str, doc_id: str) -> HeadApiResponse:
+        """
+        Check whether a document exists in the given index.
+
+        Uses lightweight HEAD request.
+        """
+        return self.client.exists(
+            index=index,
+            id=doc_id,
+        )

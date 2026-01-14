@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Iterable, Dict, Any
 
-from podcast_search.storage.base import SearchDataStorage
+from src.storage.base import SearchDataStorage
 
 
 class LocalSearchDataStorage(SearchDataStorage):
@@ -23,14 +23,22 @@ class LocalSearchDataStorage(SearchDataStorage):
         self.data_dir = data_dir
         self.shows_dir = data_dir / "normalized" / "shows"
         self.episodes_dir = data_dir / "normalized" / "episodes"
+        print("storage init data_dir =", data_dir)
 
     # ---------- shows ----------
 
-    def list_show_ids(self) -> Iterable[str]:
+    def list_show_ids(self) -> list[str]:
+        """
+        List all show IDs from normalized crawler output.
+
+        Returns empty list if directory does not exist.
+        """
+        print(self.shows_dir, self.episodes_dir, self.data_dir)
+        print(self.shows_dir.exists())
         if not self.shows_dir.exists():
             return []
 
-        return (
+        return sorted(
             path.stem
             for path in self.shows_dir.iterdir()
             if path.is_file() and path.suffix == ".json"
