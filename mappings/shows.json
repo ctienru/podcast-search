@@ -10,14 +10,29 @@
             "ignore_above": 256
           }
         }
+      },
+      {
+        "external_urls_keywords": {
+          "path_match": "external_urls.*",
+          "mapping": {
+            "type": "keyword",
+            "index": false,
+            "ignore_above": 512
+          }
+        }
       }
     ],
     "properties": {
-      "podcast_id": {
+      "show_id": {
         "type": "keyword"
       },
 
       "external_ids": {
+        "type": "object",
+        "dynamic": true
+      },
+
+      "external_urls": {
         "type": "object",
         "dynamic": true
       },
@@ -55,6 +70,10 @@
 
       "episode_count": {
         "type": "integer"
+      },
+
+      "last_episode_at": {
+        "type": "date"
       },
 
       "popularity_score": {

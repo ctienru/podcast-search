@@ -35,8 +35,18 @@
         }
       },
       {
-        "podcast_external_ids_keywords": {
-          "path_match": "podcast.external_ids.*",
+        "external_urls_keywords": {
+          "path_match": "external_urls.*",
+          "mapping": {
+            "type": "keyword",
+            "index": false,
+            "ignore_above": 512
+          }
+        }
+      },
+      {
+        "show_external_ids_keywords": {
+          "path_match": "show.external_ids.*",
           "mapping": {
             "type": "keyword",
             "ignore_above": 256
@@ -50,6 +60,11 @@
       },
 
       "external_ids": {
+        "type": "object",
+        "dynamic": true
+      },
+
+      "external_urls": {
         "type": "object",
         "dynamic": true
       },
@@ -92,11 +107,28 @@
         "index": false
       },
 
-      "podcast": {
+      "audio": {
         "type": "object",
         "dynamic": "strict",
         "properties": {
-          "podcast_id": {
+          "url": {
+            "type": "keyword",
+            "index": false
+          },
+          "type": {
+            "type": "keyword"
+          },
+          "length_bytes": {
+            "type": "long"
+          }
+        }
+      },
+
+      "show": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "show_id": {
             "type": "keyword"
           },
 

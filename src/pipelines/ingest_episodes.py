@@ -1,5 +1,5 @@
 import logging
-from typing import Iterable, Dict
+from typing import Dict, Iterable, Optional
 
 from elasticsearch import helpers
 
@@ -8,103 +8,134 @@ from src.storage import storage
 from src.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
+logging.getLogger("elastic_transport").setLevel(logging.WARNING)
+logging.getLogger("elasticsearch").setLevel(logging.WARNING)
+
 
 class IngestEpisodesPipeline:
     """
-    Ingest canonical episode documents into Elasticsearch.
+    Ingest canonical episode documents into Elasticsearch `episodes` index (alias).
 
-    Strategy:
-    - Use bulk + op_type=create
-    - Existing documents are skipped automatically (409 conflict)
-    - No per-document exists check (fast & scalable)
+    - Reads canonical episode JSONs from storage
+    - Projects them into search-optimized documents
+    - Bulk indexes into ES using alias
     """
 
-    INDEX_NAME = "episodes"
+    INDEX_ALIAS = "episodes"
 
     def __init__(
         self,
-        es_service: ElasticsearchService | None = None,
+        es_service: Optional[ElasticsearchService] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
 
-    # ---------- data loading ----------
+    # ---------- load ----------
 
-    def iter_episode_docs(self) -> Iterable[Dict]:
-        episode_ids = list(storage.list_episode_ids())
-
-        if not episode_ids:
-            logger.warning("no_episodes_to_ingest")
-            return
-
-        logger.info(
-            "episodes_loaded",
-            extra={"count": len(episode_ids)},
-        )
-
-        for episode_id in episode_ids:
-            doc = storage.load_episode(episode_id)
-            if not doc:
+    def load_episodes(self) -> Iterable[Dict]:
+        for episode_id in storage.list_episode_ids():
+            data = storage.load_episode(episode_id)
+            if not data:
                 logger.warning(
-                    "episode_load_failed",
+                    "episode_not_found_in_storage",
                     extra={"episode_id": episode_id},
                 )
                 continue
+            yield data
 
-            yield doc
+    # ---------- transform ----------
 
-    # ---------- bulk actions ----------
+    def to_es_doc(self, episode: Dict) -> Dict:
+        """
+        Project canonical episode into Elasticsearch document
+        according to episodes mapping.
+        """
 
-    def build_actions(self) -> Iterable[Dict]:
-        for episode in self.iter_episode_docs():
-            yield {
-                "_index": self.INDEX_NAME,
-                "_id": episode["episode_id"],
-                "_op_type": "create",   # ⭐ 핵심
-                "_source": episode,
-            }
+        audio = episode.get("audio") or {}
+        external_ids = episode.get("external_ids") or {}
+
+        show_id = episode.get("show_id")
+
+        return {
+            "_index": self.INDEX_ALIAS,
+            "_id": episode["episode_id"],
+
+            "_source": {
+                "episode_id": episode["episode_id"],
+
+                # ---- external ids ----
+                # passthrough canonical external_ids
+                "external_ids": external_ids,
+
+                # ---- content ----
+                "title": episode.get("title"),
+                "description": episode.get("description"),
+                "language": episode.get("language"),
+
+                "published_at": episode.get("published_at"),
+                "duration_sec": episode.get("duration_sec"),
+
+                # ---- audio ----
+                "audio": {
+                    "url": audio.get("url"),
+                    "type": audio.get("type"),
+                    "length_bytes": audio.get("length_bytes"),
+                },
+
+                # ---- show (STRICT OBJECT) ----
+                "show": {
+                    "show_id": show_id,
+                },
+
+                # ---- timestamps ----
+                "created_at": episode.get("created_at"),
+                "updated_at": episode.get("updated_at"),
+            },
+        }
+
+    # ---------- bulk ----------
+
+    def build_actions(self, episodes: Iterable[Dict]):
+        for episode in episodes:
+            try:
+                yield self.to_es_doc(episode)
+            except Exception:
+                logger.exception(
+                    "build_episode_doc_failed",
+                    extra={"episode_id": episode.get("episode_id")},
+                )
 
     # ---------- orchestration ----------
 
     def run(self) -> None:
+        episodes = list(self.load_episodes())
+
         logger.info(
-            "episode_ingest_start",
-            extra={"index": self.INDEX_NAME},
+            "episodes_loaded",
+            extra={"count": len(episodes)},
         )
+
+        if not episodes:
+            logger.warning("no_episodes_to_ingest")
+            return
 
         success, errors = helpers.bulk(
             self.es.client,
-            self.build_actions(),
-            chunk_size=500,
+            self.build_actions(episodes),
             raise_on_error=False,
-            stats_only=False,
         )
 
-        created = success
-        skipped = 0
-        failed = 0
-
-        for err in errors:
-            action, info = next(iter(err.items()))
-
-            status = info.get("status")
-            if status == 409:
-                skipped += 1
-            else:
-                failed += 1
-
         logger.info(
-            "episode_ingest_finished",
+            "episodes_ingested",
             extra={
-                "ingest_created": created,
-                "ingest_skipped": skipped,
-                "ingest_failed": failed,
+                "success": success,
+                "errors": len(errors),
             },
         )
 
-        if failed:
+        if errors:
             logger.warning(
-                "episode_ingest_failed_samples",
-                extra={"sample": errors[:3]},
+                "episode_ingest_errors_sample",
+                extra={"sample": errors[:5]},
             )
 
 

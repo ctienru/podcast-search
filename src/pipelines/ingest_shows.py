@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("elastic_transport").setLevel(logging.WARNING)
 logging.getLogger("elasticsearch").setLevel(logging.WARNING)
 
+
 class IngestShowsPipeline:
     """
     Ingest canonical show documents into Elasticsearch `shows` index (alias).
@@ -51,30 +52,43 @@ class IngestShowsPipeline:
         Project canonical show into Elasticsearch document
         according to shows mapping.
         """
+        external_urls = show.get("external_urls") or {}
+        image = show.get("image") or {}
+        episode_stats = show.get("episode_stats") or {}
+
         return {
             "_index": self.INDEX_ALIAS,
             "_id": show["show_id"],
-
             "_source": {
-                "podcast_id": show["show_id"],
+                "show_id": show["show_id"],
 
+                # ---- external ids ----
                 "external_ids": {
                     "apple_podcasts": show.get("external_id"),
                 },
 
+                # ---- external urls ----
+                "external_urls": {
+                    "apple_podcasts": external_urls.get("apple_podcasts"),
+                },
+
+                # ---- content ----
                 "title": show.get("title"),
                 "publisher": show.get("author"),
 
-                # v1: fixed or derived
-                "language": "en",
+                "language": show.get("language"),
 
-                # optional / future fields
-                # "episode_count": None,
-                # "popularity_score": None,
+                # ---- episode stats ----
+                "episode_count": episode_stats.get("episode_count"),
+                "last_episode_at": episode_stats.get("last_episode_at"),
 
-                # UI fields (if available later)
-                # "image_url": None,
+                # ---- ranking ----
+                "popularity_score": None,
 
+                # ---- media ----
+                "image_url": image.get("url"),
+
+                # ---- timestamps ----
                 "created_at": show.get("created_at"),
                 "updated_at": show.get("updated_at"),
             },

@@ -1,6 +1,6 @@
 # Elasticsearch Mapping – Shows Index
 
-This document defines the Elasticsearch index mapping for **podcast shows**.
+This document defines the Elasticsearch index mapping for **show episodes**.
 It is designed for **discovery search** (fast UI rendering, stable fields, and future ranking).
 
 This file is intentionally written in plain Markdown (tables only)
@@ -28,13 +28,12 @@ Shows use a **dual-layer identifier model**.
 
 | Field | Type | Indexed | Required | Description |
 |------|------|---------|----------|-------------|
-| podcast_id | keyword | Yes | Yes | System-generated, stable internal show ID |
+| show_id | keyword | Yes | Yes | System-generated, stable internal show ID |
 
 Internal identifiers are:
-- used in API responses
 - used as Elasticsearch `_id`
-- used in URLs and cache keys
-- independent of external content sources
+- used for joins with episodes
+- used internally as the stable show identifier
 
 ---
 
@@ -64,7 +63,7 @@ via `dynamic_templates`.
 Allowed source names are validated at the ingestion layer.
 
 External identifiers are used for ingestion and synchronization,
-not as primary identifiers in APIs.
+not as primary identifiers in search or APIs.
 
 ---
 
@@ -74,7 +73,7 @@ not as primary identifiers in APIs.
 
 | Field | Type | Indexed | Required | Description |
 |------|------|---------|----------|-------------|
-| podcast_id | keyword | Yes | Yes | Stable internal identifier for the show |
+| show_id | keyword | Yes | Yes | Stable internal identifier for the show |
 | title | text | Yes | Yes | Main searchable title |
 | description | text | Yes | No | Searchable summary |
 | publisher | text | Yes | No | Creator / publisher name |
@@ -93,7 +92,7 @@ not as primary identifiers in APIs.
 
 | Field | Type | Notes |
 |------|------|------|
-| podcast_id | keyword | Internal, stable ID used across the system |
+| show_id | keyword | Internal, stable ID used across the system |
 | external_ids | object | Multi-source external ID map (see rules above) |
 
 ---
