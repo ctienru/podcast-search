@@ -23,7 +23,6 @@ class LocalSearchDataStorage(SearchDataStorage):
         self.data_dir = data_dir
         self.shows_dir = data_dir / "normalized" / "shows"
         self.episodes_dir = data_dir / "normalized" / "episodes"
-        print("storage init data_dir =", data_dir)
 
     # ---------- shows ----------
 
@@ -33,8 +32,6 @@ class LocalSearchDataStorage(SearchDataStorage):
 
         Returns empty list if directory does not exist.
         """
-        print(self.shows_dir, self.episodes_dir, self.data_dir)
-        print(self.shows_dir.exists())
         if not self.shows_dir.exists():
             return []
 

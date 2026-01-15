@@ -7,8 +7,6 @@ DATA_DIR = Path(
     os.getenv("DATA_DIR", PROJECT_ROOT / "data")
 )
 
-print("DATA_DIR", DATA_DIR)
-
 if not DATA_DIR.is_absolute():
     DATA_DIR = (PROJECT_ROOT / DATA_DIR).resolve()
 else:
