@@ -1,0 +1,12 @@
+{
+  "size": 0,
+  "aggs": {
+    "suggestions": {
+      "terms": {
+        "field": "title.keyword",
+        "include": "{{prefix}}.*",
+        "size": 5
+      }
+    }
+  }
+}
