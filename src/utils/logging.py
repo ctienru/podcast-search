@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
@@ -8,7 +8,7 @@ from pathlib import Path
 class ExtraJsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         log = {
-            "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),

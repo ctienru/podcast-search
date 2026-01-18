@@ -20,3 +20,8 @@ DATA_BACKEND = os.getenv("DATA_BACKEND", "local")
 
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Index management settings
+INDEX_VERSION = int(os.getenv("INDEX_VERSION", "1"))
+REINDEX = os.getenv("REINDEX", "false").lower() == "true"
+ALLOW_DELETE_BASE_INDEX = os.getenv("ALLOW_DELETE_BASE_INDEX", "false").lower() == "true"
