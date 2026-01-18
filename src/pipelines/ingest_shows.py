@@ -56,6 +56,9 @@ class IngestShowsPipeline:
         image = show.get("image") or {}
         episode_stats = show.get("episode_stats") or {}
 
+        # Use provider from show data, default to "apple_podcasts" for backward compatibility
+        provider = show.get("provider", "apple_podcasts")
+
         return {
             "_index": self.INDEX_ALIAS,
             "_id": show["show_id"],
@@ -64,12 +67,12 @@ class IngestShowsPipeline:
 
                 # ---- external ids ----
                 "external_ids": {
-                    "apple_podcasts": show.get("external_id"),
+                    provider: show.get("external_id"),
                 },
 
                 # ---- external urls ----
                 "external_urls": {
-                    "apple_podcasts": external_urls.get("apple_podcasts"),
+                    provider: external_urls.get(provider),
                 },
 
                 # ---- content ----

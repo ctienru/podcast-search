@@ -1,10 +1,14 @@
 import logging
-import os
 from typing import Optional
 
 from src.es.mapping_loader import MappingLoader
 from src.services.es_service import ElasticsearchService
-from src.config.settings import MAPPINGS_DIR
+from src.config.settings import (
+    MAPPINGS_DIR,
+    INDEX_VERSION,
+    REINDEX,
+    ALLOW_DELETE_BASE_INDEX,
+)
 from src.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -21,14 +25,15 @@ class CreateIndicesPipeline:
         es_service: Optional[ElasticsearchService] = None,
         mapping_loader: Optional[MappingLoader] = None,
         index_version: Optional[int] = None,
-        reindex: bool = False,
+        reindex: Optional[bool] = None,
+        allow_delete_base_index: Optional[bool] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.mappings = mapping_loader or MappingLoader(MAPPINGS_DIR)
-        self.index_version = index_version or int(os.getenv("INDEX_VERSION", "1"))
-        self.reindex = reindex or os.getenv("REINDEX", "false").lower() == "true"
+        self.index_version = index_version if index_version is not None else INDEX_VERSION
+        self.reindex = reindex if reindex is not None else REINDEX
         self.allow_delete_base_index = (
-            os.getenv("ALLOW_DELETE_BASE_INDEX", "false").lower() == "true"
+            allow_delete_base_index if allow_delete_base_index is not None else ALLOW_DELETE_BASE_INDEX
         )
     # ---------- helpers ----------
 
@@ -153,7 +158,23 @@ class CreateIndicesPipeline:
 
     def run_for_index(self, base_index: str) -> None:
         new_index = self.create_versioned_index(base_index)
-        self.reindex_if_needed(base_index, new_index)
+
+        # Find the old versioned index to reindex from
+        old_index = None
+        if self.index_version > 1:
+            old_version = self.index_version - 1
+            old_index = f"{base_index}_v{old_version}"
+
+        # If old versioned index doesn't exist, try the alias (which might point to an older version)
+        if old_index and not self.es.index_exists(old_index):
+            if self.es.alias_exists(base_index):
+                old_index = base_index
+            else:
+                old_index = None
+
+        if old_index:
+            self.reindex_if_needed(old_index, new_index)
+
         self.switch_alias(base_index, new_index)
 
     def run(self) -> None:
