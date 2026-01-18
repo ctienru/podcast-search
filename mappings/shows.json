@@ -48,11 +48,6 @@
         }
       },
 
-      "description": {
-        "type": "text",
-        "analyzer": "standard"
-      },
-
       "publisher": {
         "type": "text",
         "analyzer": "standard",

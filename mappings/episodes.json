@@ -162,6 +162,11 @@
           "image_url": {
             "type": "keyword",
             "index": false
+          },
+
+          "external_urls": {
+            "type": "object",
+            "dynamic": true
           }
         }
       },
