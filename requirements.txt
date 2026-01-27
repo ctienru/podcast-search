@@ -1,2 +1,16 @@
 elasticsearch>=8.11.0,<9.0.0
 python-dotenv~=1.2.1
+numpy~=1.26.4
+
+# Data cleaning
+beautifulsoup4>=4.12.0,<5.0.0
+lxml>=5.0.0,<6.0.0
+
+# Embedding
+sentence-transformers>=2.2.0,<3.0.0
+torch>=2.0.0,<3.0.0
+
+# Embedding API
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.32.0,<1.0.0
+pydantic>=2.0.0,<3.0.0
