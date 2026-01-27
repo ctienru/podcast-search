@@ -18,7 +18,6 @@ import argparse
 import json
 import logging
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Dict, Generator, Iterable, Optional
 
@@ -28,6 +27,7 @@ from src.embedding.encoder import EmbeddingEncoder
 from src.services.es_service import ElasticsearchService
 from src.storage import storage
 from src.utils.logging import setup_logging
+from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
 
 logger = logging.getLogger(__name__)
 logging.getLogger("elastic_transport").setLevel(logging.WARNING)
@@ -184,25 +184,6 @@ class EmbedAndIngestPipeline:
             results.append((inp, self.encoder.to_list(emb)))
         return results
 
-    def _parse_pub_date(self, pub_date_str: Optional[str]) -> Optional[str]:
-        """Parse RFC 2822 date to ISO 8601 format."""
-        if not pub_date_str:
-            return None
-        try:
-            dt = parsedate_to_datetime(pub_date_str)
-            return dt.isoformat()
-        except Exception:
-            return None
-
-    def _parse_duration(self, duration_str: Optional[str]) -> Optional[int]:
-        """Parse duration string to seconds."""
-        if not duration_str:
-            return None
-        try:
-            return int(duration_str)
-        except ValueError:
-            return None
-
     def to_es_doc(
         self,
         embedding_input: Dict,
@@ -233,9 +214,10 @@ class EmbedAndIngestPipeline:
         description = normalized.get("description")
 
         # Parse metadata from original_meta
-        published_at = self._parse_pub_date(original_meta.get("pub_date"))
-        duration_sec = self._parse_duration(original_meta.get("duration"))
+        published_at = parse_pub_date(original_meta.get("pub_date"))
+        duration_sec = parse_duration(original_meta.get("duration"))
         audio_url = original_meta.get("audio_url")
+        language = normalize_language(original_meta.get("language"))
 
         # Get show data
         show_obj = {"show_id": show_id}
@@ -270,6 +252,7 @@ class EmbedAndIngestPipeline:
                 # Metadata
                 "published_at": published_at,
                 "duration_sec": duration_sec,
+                "language": language,
 
                 # Audio (minimal info from original_meta)
                 "audio": {

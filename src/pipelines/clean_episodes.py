@@ -131,6 +131,7 @@ class CleanEpisodesPipeline:
         # Parse RSS
         show, episodes = self.parser.parse_file(xml_path)
         show_id = show.show_id
+        show_language = show.language  # From RSS <language> tag
 
         logger.info(
             "processing_show",
@@ -150,7 +151,7 @@ class CleanEpisodesPipeline:
         # Process each episode
         for episode in episodes:
             try:
-                cleaned = self._clean_episode(episode)
+                cleaned = self._clean_episode(episode, language=show_language)
                 self._save_cleaned(cleaned)
 
                 show_stats["episodes_processed"] += 1
@@ -181,7 +182,9 @@ class CleanEpisodesPipeline:
 
         return show_stats
 
-    def _clean_episode(self, episode: RawEpisode) -> dict:
+    def _clean_episode(
+        self, episode: RawEpisode, language: Optional[str] = None
+    ) -> dict:
         """Clean a single episode and return Layer 2 dict."""
         cleaned = self.cleaner.clean_episode(
             episode_id=episode.episode_id,
@@ -201,6 +204,7 @@ class CleanEpisodesPipeline:
             "pub_date": episode.pub_date,
             "duration": episode.duration,
             "audio_url": episode.audio_url,
+            "language": language,  # From RSS <language> tag
         }
 
         return result

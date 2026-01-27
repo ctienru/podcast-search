@@ -9,16 +9,16 @@ Target: Elasticsearch episodes index
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 from elasticsearch.helpers import streaming_bulk
 
-from src.config.settings import DATA_DIR
+from src.config.settings import PROJECT_ROOT
 from src.services.es_service import ElasticsearchService
 from src.storage import storage
 from src.utils.logging import setup_logging
+from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
 
 logger = logging.getLogger(__name__)
 logging.getLogger("elastic_transport").setLevel(logging.WARNING)
@@ -44,7 +44,8 @@ class IngestEpisodesPipeline:
         cleaned_dir: Optional[Path] = None,
         es_service: Optional[ElasticsearchService] = None,
     ) -> None:
-        self.cleaned_dir = cleaned_dir or Path(DATA_DIR) / "cleaned" / "episodes"
+        # Cleaned episodes are in podcast-search/data, not DATA_DIR (which points to crawler)
+        self.cleaned_dir = cleaned_dir or PROJECT_ROOT / "data" / "cleaned" / "episodes"
         self.es = es_service or ElasticsearchService()
 
         # Pre-load all shows into memory for efficient lookup during episode ingestion
@@ -148,7 +149,7 @@ class IngestEpisodesPipeline:
                 show_obj["external_urls"] = external_urls
 
         # Parse duration to seconds
-        duration_sec = self._parse_duration(original_meta.get("duration"))
+        duration_sec = parse_duration(original_meta.get("duration"))
 
         return {
             "_index": self.INDEX_ALIAS,
@@ -161,8 +162,9 @@ class IngestEpisodesPipeline:
                 "description": normalized.get("description"),
 
                 # Metadata (from original_meta)
-                "published_at": original_meta.get("pub_date"),
+                "published_at": parse_pub_date(original_meta.get("pub_date")),
                 "duration_sec": duration_sec,
+                "language": normalize_language(original_meta.get("language")),
 
                 # Audio
                 "audio": {
@@ -173,34 +175,6 @@ class IngestEpisodesPipeline:
                 "show": show_obj,
             },
         }
-
-    @staticmethod
-    def _parse_duration(duration: Optional[str]) -> Optional[int]:
-        """Parse duration string to seconds."""
-        if not duration:
-            return None
-
-        # Already an integer
-        if isinstance(duration, int):
-            return duration
-
-        # Try to parse as integer string
-        try:
-            return int(duration)
-        except ValueError:
-            pass
-
-        # Parse HH:MM:SS or MM:SS format
-        parts = duration.split(":")
-        try:
-            if len(parts) == 3:
-                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-            elif len(parts) == 2:
-                return int(parts[0]) * 60 + int(parts[1])
-        except ValueError:
-            pass
-
-        return None
 
     # ---------- bulk ----------
 
