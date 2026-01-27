@@ -1,0 +1,46 @@
+# =============================================================================
+# Embedding API Service Dockerfile
+# =============================================================================
+# Optimized for running the FastAPI embedding service
+# Memory: ~700MB (model ~400MB + Python runtime)
+#
+# Build:
+#   docker build -f docker/Dockerfile.embedding -t podcast-embedding .
+#
+# Run:
+#   docker run -p 8000:8000 podcast-embedding
+# =============================================================================
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install only embedding-related dependencies (smaller image)
+COPY requirements.txt .
+
+# Install dependencies
+# - Use --no-cache-dir to reduce image size
+# - torch CPU-only version would be ideal but sentence-transformers handles this
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy only the necessary source code for API
+COPY src/api/ src/api/
+COPY src/embedding/ src/embedding/
+
+# Environment variables
+ENV MODEL_NAME=paraphrase-multilingual-MiniLM-L12-v2
+ENV EMBEDDING_BATCH_SIZE=8
+ENV LOG_LEVEL=INFO
+ENV PYTHONUNBUFFERED=1
+
+# Expose API port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+# Run the API server
+# - workers=1: embedding model is memory-heavy, single worker is sufficient
+# - host=0.0.0.0: allow external connections
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

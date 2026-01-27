@@ -9,9 +9,9 @@ from src.services.es_service import ElasticsearchService
 @pytest.fixture
 def mock_es_client():
     """Create a mock Elasticsearch client."""
-    with patch('src.services.es_service.Elasticsearch') as mock_es_class:
+    with patch('src.services.es_service.get_es_client') as mock_get_client:
         mock_client = MagicMock()
-        mock_es_class.return_value = mock_client
+        mock_get_client.return_value = mock_client
         yield mock_client
 
 

@@ -1,0 +1,402 @@
+"""
+Search Service
+
+Supports three search modes:
+1. BM25 - Pure text search
+2. kNN - Pure semantic search
+3. Hybrid - BM25 + kNN + RRF fusion
+
+Usage:
+    from src.services.search_service import SearchService
+
+    service = SearchService()
+
+    # BM25 search
+    results = service.search_bm25("podcast about AI", size=10)
+
+    # kNN semantic search
+    results = service.search_knn("podcast about AI", size=10)
+
+    # Hybrid search (recommended)
+    results = service.search_hybrid("podcast about AI", size=10)
+"""
+
+import logging
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from src.embedding.encoder import EmbeddingEncoder
+from src.es.client import get_es_client
+
+logger = logging.getLogger(__name__)
+
+
+class SearchMode(Enum):
+    BM25 = "bm25"
+    KNN = "knn"
+    HYBRID = "hybrid"
+
+
+@dataclass
+class SearchResult:
+    """Single search result."""
+    episode_id: str
+    title: str
+    description: Optional[str]
+    score: float
+    show_title: Optional[str] = None
+    show_id: Optional[str] = None
+    published_at: Optional[str] = None
+    duration_sec: Optional[int] = None
+
+
+@dataclass
+class SearchResponse:
+    """Search response with results and metadata."""
+    results: List[SearchResult]
+    total: int
+    took_ms: int
+    mode: SearchMode
+
+
+class SearchService:
+    """
+    Elasticsearch search service supporting BM25, kNN, and Hybrid search.
+
+    Hybrid search uses Reciprocal Rank Fusion (RRF) to combine:
+    - BM25: Text matching on title and description
+    - kNN: Semantic similarity on embedding vectors
+    """
+
+    INDEX = "episodes"
+
+    # RRF parameters
+    RRF_WINDOW_SIZE = 100
+    RRF_RANK_CONSTANT = 60
+
+    # kNN parameters
+    KNN_NUM_CANDIDATES = 100
+
+    def __init__(
+        self,
+        encoder: Optional[EmbeddingEncoder] = None,
+    ):
+        self.client = get_es_client()
+        self._encoder = encoder
+
+    @property
+    def encoder(self) -> EmbeddingEncoder:
+        """Lazy load encoder."""
+        if self._encoder is None:
+            logger.info("loading_encoder_for_search")
+            self._encoder = EmbeddingEncoder()
+        return self._encoder
+
+    def _build_bm25_query(self, query: str) -> Dict[str, Any]:
+        """Build BM25 query for text matching."""
+        return {
+            "bool": {
+                "should": [
+                    {
+                        "multi_match": {
+                            "query": query,
+                            "fields": ["title^3", "description"],
+                            "type": "best_fields",
+                        }
+                    },
+                    {
+                        "match_phrase": {
+                            "title": {
+                                "query": query,
+                                "boost": 2,
+                            }
+                        }
+                    },
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+
+    def _build_knn_clause(
+        self,
+        query_vector: List[float],
+        k: int,
+    ) -> Dict[str, Any]:
+        """Build kNN clause for semantic search."""
+        return {
+            "field": "embedding",
+            "query_vector": query_vector,
+            "k": k,
+            "num_candidates": self.KNN_NUM_CANDIDATES,
+        }
+
+    def _parse_hits(self, hits: List[Dict]) -> List[SearchResult]:
+        """Parse ES hits into SearchResult objects."""
+        results = []
+        for hit in hits:
+            source = hit.get("_source", {})
+            show = source.get("show", {})
+
+            results.append(SearchResult(
+                episode_id=source.get("episode_id", hit.get("_id")),
+                title=source.get("title", ""),
+                description=source.get("description"),
+                score=hit.get("_score", 0.0),
+                show_title=show.get("title"),
+                show_id=show.get("show_id"),
+                published_at=source.get("published_at"),
+                duration_sec=source.get("duration_sec"),
+            ))
+
+        return results
+
+    def search_bm25(
+        self,
+        query: str,
+        size: int = 10,
+    ) -> SearchResponse:
+        """
+        Pure BM25 text search.
+
+        Args:
+            query: Search query text
+            size: Number of results to return
+
+        Returns:
+            SearchResponse with results
+        """
+        body = {
+            "query": self._build_bm25_query(query),
+            "size": size,
+            "_source": [
+                "episode_id", "title", "description",
+                "show", "published_at", "duration_sec"
+            ],
+        }
+
+        response = self.client.search(index=self.INDEX, body=body)
+
+        hits = response.get("hits", {})
+        results = self._parse_hits(hits.get("hits", []))
+        total = hits.get("total", {}).get("value", 0)
+        took = response.get("took", 0)
+
+        logger.info(
+            "search_bm25",
+            extra={
+                "query": query,
+                "results": len(results),
+                "total": total,
+                "took_ms": took,
+            },
+        )
+
+        return SearchResponse(
+            results=results,
+            total=total,
+            took_ms=took,
+            mode=SearchMode.BM25,
+        )
+
+    def search_knn(
+        self,
+        query: str,
+        size: int = 10,
+    ) -> SearchResponse:
+        """
+        Pure kNN semantic search.
+
+        Args:
+            query: Search query text (will be encoded to vector)
+            size: Number of results to return
+
+        Returns:
+            SearchResponse with results
+        """
+        # Encode query to vector
+        query_vector = self.encoder.encode(query).tolist()
+
+        body = {
+            "knn": self._build_knn_clause(query_vector, k=size),
+            "size": size,
+            "_source": [
+                "episode_id", "title", "description",
+                "show", "published_at", "duration_sec"
+            ],
+        }
+
+        response = self.client.search(index=self.INDEX, body=body)
+
+        hits = response.get("hits", {})
+        results = self._parse_hits(hits.get("hits", []))
+        total = hits.get("total", {}).get("value", 0)
+        took = response.get("took", 0)
+
+        logger.info(
+            "search_knn",
+            extra={
+                "query": query,
+                "results": len(results),
+                "total": total,
+                "took_ms": took,
+            },
+        )
+
+        return SearchResponse(
+            results=results,
+            total=total,
+            took_ms=took,
+            mode=SearchMode.KNN,
+        )
+
+    def _compute_rrf_scores(
+        self,
+        bm25_results: List[SearchResult],
+        knn_results: List[SearchResult],
+        rank_constant: int = 60,
+    ) -> Dict[str, float]:
+        """
+        Compute RRF scores manually.
+
+        RRF score = sum(1 / (rank_constant + rank_i))
+
+        Args:
+            bm25_results: Results from BM25 search
+            knn_results: Results from kNN search
+            rank_constant: RRF constant k (default: 60)
+
+        Returns:
+            Dict mapping episode_id to RRF score
+        """
+        rrf_scores: Dict[str, float] = {}
+
+        # Add BM25 contributions
+        for rank, result in enumerate(bm25_results, start=1):
+            episode_id = result.episode_id
+            rrf_scores[episode_id] = rrf_scores.get(episode_id, 0) + 1 / (rank_constant + rank)
+
+        # Add kNN contributions
+        for rank, result in enumerate(knn_results, start=1):
+            episode_id = result.episode_id
+            rrf_scores[episode_id] = rrf_scores.get(episode_id, 0) + 1 / (rank_constant + rank)
+
+        return rrf_scores
+
+    def search_hybrid(
+        self,
+        query: str,
+        size: int = 10,
+        rrf_window_size: Optional[int] = None,
+        rrf_rank_constant: Optional[int] = None,
+    ) -> SearchResponse:
+        """
+        Hybrid search combining BM25 and kNN with RRF fusion.
+
+        RRF (Reciprocal Rank Fusion) combines rankings from different
+        retrieval methods without requiring score normalization.
+
+        RRF score = sum(1 / (rank_constant + rank_i))
+
+        Note: This implementation computes RRF manually since ES RRF
+        requires a paid license.
+
+        Args:
+            query: Search query text
+            size: Number of results to return
+            rrf_window_size: Number of results to consider for RRF (default: 100)
+            rrf_rank_constant: RRF constant k (default: 60)
+
+        Returns:
+            SearchResponse with results
+        """
+        import time
+        start_time = time.time()
+
+        window_size = rrf_window_size or self.RRF_WINDOW_SIZE
+        rank_constant = rrf_rank_constant or self.RRF_RANK_CONSTANT
+
+        # Get results from both methods
+        bm25_response = self.search_bm25(query, size=window_size)
+        knn_response = self.search_knn(query, size=window_size)
+
+        # Compute RRF scores
+        rrf_scores = self._compute_rrf_scores(
+            bm25_response.results,
+            knn_response.results,
+            rank_constant=rank_constant,
+        )
+
+        # Build result map for deduplication
+        result_map: Dict[str, SearchResult] = {}
+        for result in bm25_response.results + knn_response.results:
+            if result.episode_id not in result_map:
+                result_map[result.episode_id] = result
+
+        # Sort by RRF score and take top results
+        sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+
+        results = []
+        for episode_id in sorted_ids[:size]:
+            result = result_map[episode_id]
+            # Update score to RRF score
+            results.append(SearchResult(
+                episode_id=result.episode_id,
+                title=result.title,
+                description=result.description,
+                score=rrf_scores[episode_id],
+                show_title=result.show_title,
+                show_id=result.show_id,
+                published_at=result.published_at,
+                duration_sec=result.duration_sec,
+            ))
+
+        took_ms = int((time.time() - start_time) * 1000)
+        total = len(rrf_scores)
+
+        logger.info(
+            "search_hybrid",
+            extra={
+                "query": query,
+                "results": len(results),
+                "total": total,
+                "took_ms": took_ms,
+                "rrf_window_size": window_size,
+                "rrf_rank_constant": rank_constant,
+                "bm25_results": len(bm25_response.results),
+                "knn_results": len(knn_response.results),
+            },
+        )
+
+        return SearchResponse(
+            results=results,
+            total=total,
+            took_ms=took_ms,
+            mode=SearchMode.HYBRID,
+        )
+
+    def search(
+        self,
+        query: str,
+        mode: SearchMode = SearchMode.HYBRID,
+        size: int = 10,
+        **kwargs,
+    ) -> SearchResponse:
+        """
+        Unified search interface.
+
+        Args:
+            query: Search query text
+            mode: Search mode (BM25, KNN, or HYBRID)
+            size: Number of results to return
+            **kwargs: Additional arguments for specific search modes
+
+        Returns:
+            SearchResponse with results
+        """
+        if mode == SearchMode.BM25:
+            return self.search_bm25(query, size=size)
+        elif mode == SearchMode.KNN:
+            return self.search_knn(query, size=size)
+        else:
+            return self.search_hybrid(query, size=size, **kwargs)

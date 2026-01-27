@@ -4,14 +4,14 @@ from elastic_transport import HeadApiResponse
 from elasticsearch import Elasticsearch
 from elasticsearch.exceptions import RequestError, ConnectionError
 
-from src.config.settings import ES_HOST
+from src.es.client import get_es_client
 
 logger = logging.getLogger(__name__)
 
 
 class ElasticsearchService:
-    def __init__(self, host: str = ES_HOST):
-        self.client = Elasticsearch(hosts=[host])
+    def __init__(self, client: Elasticsearch | None = None):
+        self.client = client or get_es_client()
 
     def index_exists(self, name: str) -> bool:
         return self.client.indices.exists(index=name)
