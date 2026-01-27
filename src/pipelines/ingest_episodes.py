@@ -1,11 +1,21 @@
+"""
+Ingest Episodes Pipeline
+
+Read cleaned episodes and ingest them to Elasticsearch.
+
+Source: data/cleaned/episodes/*.json
+Target: Elasticsearch episodes index
+"""
+
+import json
 import logging
 import re
-from html import unescape
+from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-from elasticsearch import helpers
 from elasticsearch.helpers import streaming_bulk
 
+from src.config.settings import DATA_DIR
 from src.services.es_service import ElasticsearchService
 from src.storage import storage
 from src.utils.logging import setup_logging
@@ -17,9 +27,9 @@ logging.getLogger("elasticsearch").setLevel(logging.WARNING)
 
 class IngestEpisodesPipeline:
     """
-    Ingest canonical episode documents into Elasticsearch `episodes` index (alias).
+    Ingest cleaned episode documents into Elasticsearch `episodes` index.
 
-    - Reads canonical episode JSONs from storage
+    - Reads cleaned episode JSONs from data/cleaned/episodes/
     - Projects them into search-optimized documents
     - Bulk indexes into ES using alias
 
@@ -31,18 +41,18 @@ class IngestEpisodesPipeline:
 
     def __init__(
         self,
+        cleaned_dir: Optional[Path] = None,
         es_service: Optional[ElasticsearchService] = None,
     ) -> None:
+        self.cleaned_dir = cleaned_dir or Path(DATA_DIR) / "cleaned" / "episodes"
         self.es = es_service or ElasticsearchService()
+
         # Pre-load all shows into memory for efficient lookup during episode ingestion
         self._show_cache: Dict[str, Dict] = {}
         self._load_show_cache()
 
     def _load_show_cache(self) -> None:
-        """
-        Pre-load all show data into memory cache.
-        This ensures show info is available when embedding into episodes.
-        """
+        """Pre-load all show data into memory cache."""
         show_ids = storage.list_show_ids()
         loaded = 0
         for show_id in show_ids:
@@ -66,126 +76,136 @@ class IngestEpisodesPipeline:
         """Get show data from cache."""
         return self._show_cache.get(show_id)
 
-    # ---------- helpers ----------
-
-    @staticmethod
-    def _clean_html(text: Optional[str]) -> Optional[str]:
-        """
-        Remove HTML tags and decode HTML entities from text.
-        Preserves paragraph breaks as double newlines.
-        """
-        if not text:
-            return text
-
-        # Replace common block-level tags with newlines
-        text = re.sub(r'</(p|div|br)>', '\n', text, flags=re.IGNORECASE)
-        text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
-
-        # Remove all remaining HTML tags
-        text = re.sub(r'<[^>]+>', '', text)
-
-        # Decode HTML entities (e.g., &amp; → &, &lt; → <)
-        text = unescape(text)
-
-        # Clean up whitespace
-        text = re.sub(r'\n\s*\n+', '\n\n', text)  # Multiple newlines → double newline
-        text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces → single space
-        text = text.strip()
-
-        return text if text else None
-
     # ---------- load ----------
 
-    def load_episodes(self) -> Iterable[Dict]:
-        for episode_id in storage.list_episode_ids():
-            data = storage.load_episode(episode_id)
-            if not data:
+    def list_cleaned_episode_files(self) -> list[Path]:
+        """List all cleaned episode JSON files."""
+        if not self.cleaned_dir.exists():
+            return []
+        return sorted(self.cleaned_dir.glob("*.json"))
+
+    def load_cleaned_episodes(self) -> Iterable[Dict]:
+        """Load cleaned episode JSONs from filesystem."""
+        for json_path in self.list_cleaned_episode_files():
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    yield data
+            except Exception as e:
                 logger.warning(
-                    "episode_not_found_in_storage",
-                    extra={"episode_id": episode_id},
+                    "cleaned_episode_load_failed",
+                    extra={"path": str(json_path), "error": str(e)},
                 )
-                continue
-            yield data
 
     # ---------- transform ----------
 
-    def to_es_doc(self, episode: Dict) -> Dict:
+    def to_es_doc(self, cleaned_episode: Dict) -> Dict:
         """
-        Project canonical episode into Elasticsearch document
-        according to episodes mapping.
+        Project cleaned episode into Elasticsearch document.
+
+        Input format (from clean_episodes.py):
+        {
+            "episode_id": "...",
+            "show_id": "...",
+            "cleaned": {
+                "normalized": {"title": "...", "description": "..."},
+                "paragraphs": [...],
+                "stats": {...}
+            },
+            "original_meta": {
+                "guid": "...",
+                "pub_date": "...",
+                "duration": "...",
+                "audio_url": "..."
+            }
+        }
         """
+        episode_id = cleaned_episode["episode_id"]
+        show_id = cleaned_episode["show_id"]
+        cleaned = cleaned_episode.get("cleaned", {})
+        normalized = cleaned.get("normalized", {})
+        original_meta = cleaned_episode.get("original_meta", {})
 
-        audio = episode.get("audio") or {}
-        external_ids = episode.get("external_ids") or {}
+        # Load show data from cache
+        show_data = self._get_show_data(show_id) if show_id else None
+        if show_id and not show_data:
+            logger.warning(
+                "show_not_found_for_episode",
+                extra={"episode_id": episode_id, "show_id": show_id},
+            )
 
-        show_id = episode.get("show_id")
-
-        # Load show data from cache to embed into episode
-        show_data = None
-        if show_id:
-            show_data = self._get_show_data(show_id)
-            if not show_data:
-                logger.warning(
-                    "show_not_found_for_episode",
-                    extra={"episode_id": episode.get("episode_id"), "show_id": show_id},
-                )
-
-        # Build show object with complete info
+        # Build show object
         show_obj = {"show_id": show_id}
         if show_data:
             show_obj["title"] = show_data.get("title")
             show_obj["publisher"] = show_data.get("author")
 
-            # Get image URL from show's image object
             image = show_data.get("image") or {}
             show_obj["image_url"] = image.get("url")
 
-            # Get external URLs
             external_urls = show_data.get("external_urls") or {}
             if external_urls:
                 show_obj["external_urls"] = external_urls
 
+        # Parse duration to seconds
+        duration_sec = self._parse_duration(original_meta.get("duration"))
+
         return {
             "_index": self.INDEX_ALIAS,
-            "_id": episode["episode_id"],
-
+            "_id": episode_id,
             "_source": {
-                "episode_id": episode["episode_id"],
+                "episode_id": episode_id,
 
-                # ---- external ids ----
-                # passthrough canonical external_ids
-                "external_ids": external_ids,
+                # Content (from cleaned)
+                "title": normalized.get("title"),
+                "description": normalized.get("description"),
 
-                # ---- content ----
-                "title": episode.get("title"),
-                "description": self._clean_html(episode.get("description")),
-                "language": episode.get("language"),
+                # Metadata (from original_meta)
+                "published_at": original_meta.get("pub_date"),
+                "duration_sec": duration_sec,
 
-                "published_at": episode.get("published_at"),
-                "duration_sec": episode.get("duration_sec"),
-
-                # ---- audio ----
+                # Audio
                 "audio": {
-                    "url": audio.get("url"),
-                    "type": audio.get("type"),
-                    "length_bytes": audio.get("length_bytes"),
+                    "url": original_meta.get("audio_url"),
                 },
 
-                # ---- show (STRICT OBJECT) ----
+                # Show (embedded from show cache)
                 "show": show_obj,
-
-                # ---- media ----
-                "image_url": episode.get("image", {}).get("url"),
-
-                # ---- timestamps ----
-                "created_at": episode.get("created_at"),
-                "updated_at": episode.get("updated_at"),
             },
         }
+
+    @staticmethod
+    def _parse_duration(duration: Optional[str]) -> Optional[int]:
+        """Parse duration string to seconds."""
+        if not duration:
+            return None
+
+        # Already an integer
+        if isinstance(duration, int):
+            return duration
+
+        # Try to parse as integer string
+        try:
+            return int(duration)
+        except ValueError:
+            pass
+
+        # Parse HH:MM:SS or MM:SS format
+        parts = duration.split(":")
+        try:
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            elif len(parts) == 2:
+                return int(parts[0]) * 60 + int(parts[1])
+        except ValueError:
+            pass
+
+        return None
 
     # ---------- bulk ----------
 
     def build_actions(self, episodes: Iterable[Dict]):
+        """Build ES bulk actions from cleaned episodes."""
         for episode in episodes:
             try:
                 yield self.to_es_doc(episode)
@@ -199,32 +219,31 @@ class IngestEpisodesPipeline:
     # ---------- orchestration ----------
 
     def run(self) -> None:
-        # Count episode IDs for progress tracking without loading all data into memory
-        episode_ids = list(storage.list_episode_ids())
-        total_count = len(episode_ids)
+        """Run the ingest pipeline."""
+        episode_files = self.list_cleaned_episode_files()
+        total_count = len(episode_files)
 
         logger.info(
             "episodes_to_process",
-            extra={"count": total_count},
+            extra={"count": total_count, "source_dir": str(self.cleaned_dir)},
         )
 
-        if not episode_ids:
-            logger.warning("no_episodes_to_ingest")
+        if not episode_files:
+            logger.warning("no_cleaned_episodes_to_ingest")
             return
 
-        # Use streaming_bulk to process episodes without loading all into memory
+        # Use streaming_bulk to process episodes
         success = 0
         errors = []
 
         for ok, item in streaming_bulk(
             self.es.client,
-            self.build_actions(self.load_episodes()),
+            self.build_actions(self.load_cleaned_episodes()),
             chunk_size=500,
             raise_on_error=False,
         ):
             if ok:
                 success += 1
-                # Report progress every 5000 episodes
                 if success % 5000 == 0:
                     logger.info(
                         "ingest_progress",
@@ -250,6 +269,7 @@ class IngestEpisodesPipeline:
 
 
 def run() -> None:
+    """Standalone entry point."""
     setup_logging()
 
     logging.getLogger("elastic_transport").setLevel(logging.WARNING)
