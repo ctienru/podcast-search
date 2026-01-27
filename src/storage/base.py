@@ -1,11 +1,14 @@
 from abc import ABC, abstractmethod
-from typing import Iterable, Dict, Any
+from typing import Iterable, Dict, Any, Optional, List
 
 
 class SearchDataStorage(ABC):
     """
-    Abstract storage interface for reading canonical crawler output.
+    Abstract storage interface for reading crawler output.
     Read-only by design.
+
+    Note: Episodes are no longer stored in normalized format.
+    podcast-search reads raw RSS XML and cleans/parses episodes itself.
     """
 
     # ---------- shows ----------
@@ -24,18 +27,34 @@ class SearchDataStorage(ABC):
         """
         pass
 
-    # ---------- episodes ----------
+    # ---------- manifests ----------
 
     @abstractmethod
-    def list_episode_ids(self) -> Iterable[str]:
+    def list_manifests(self) -> List[str]:
         """
-        Return iterable of episode IDs.
+        List all manifest timestamps (sorted).
         """
         pass
 
     @abstractmethod
-    def load_episode(self, episode_id: str) -> Dict[str, Any]:
+    def load_manifest(self, timestamp: str) -> Optional[Dict[str, Any]]:
         """
-        Load a canonical episode record.
+        Load a manifest by timestamp.
+        """
+        pass
+
+    # ---------- sync cursor ----------
+
+    @abstractmethod
+    def load_sync_cursor(self) -> Optional[Dict[str, Any]]:
+        """
+        Load the sync cursor (last synced manifest timestamp).
+        """
+        pass
+
+    @abstractmethod
+    def save_sync_cursor(self, data: Dict[str, Any]) -> None:
+        """
+        Save the sync cursor.
         """
         pass

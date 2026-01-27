@@ -1,13 +1,16 @@
 import json
+import logging
 from pathlib import Path
-from typing import Iterable, Dict, Any
+from typing import Dict, Any, List, Optional
 
 from src.storage.base import SearchDataStorage
+
+logger = logging.getLogger(__name__)
 
 
 class LocalSearchDataStorage(SearchDataStorage):
     """
-    Read canonical crawler output from local filesystem.
+    Read crawler output from local filesystem.
 
     Expected layout (from crawler):
 
@@ -15,14 +18,18 @@ class LocalSearchDataStorage(SearchDataStorage):
       normalized/
         shows/
           {show_id}.json
-        episodes/
-          {episode_id}.json
+      manifests/
+        {timestamp}.json
+        sync-cursor.json
+
+    Note: Episodes are no longer stored in normalized format.
+    podcast-search reads raw RSS XML and cleans/parses episodes itself.
     """
 
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.shows_dir = data_dir / "normalized" / "shows"
-        self.episodes_dir = data_dir / "normalized" / "episodes"
+        self.manifests_dir = data_dir / "manifests"
 
     # ---------- shows ----------
 
@@ -48,21 +55,64 @@ class LocalSearchDataStorage(SearchDataStorage):
 
         return json.loads(path.read_text(encoding="utf-8"))
 
-    # ---------- episodes ----------
+    # ---------- manifests ----------
 
-    def list_episode_ids(self) -> Iterable[str]:
-        if not self.episodes_dir.exists():
+    def list_manifests(self) -> List[str]:
+        """
+        List all manifest timestamps (sorted).
+        Returns list of timestamps like ["2026-01-18T06-00-00Z", "2026-01-18T12-00-00Z"]
+        """
+        if not self.manifests_dir.exists():
             return []
 
-        return (
-            path.stem
-            for path in self.episodes_dir.iterdir()
-            if path.is_file() and path.suffix == ".json"
-        )
+        timestamps = []
+        for path in self.manifests_dir.iterdir():
+            if path.is_file() and path.suffix == ".json":
+                filename = path.stem
+                # Skip sync-cursor.json
+                if filename != "sync-cursor":
+                    timestamps.append(filename)
 
-    def load_episode(self, episode_id: str) -> Dict[str, Any]:
-        path = self.episodes_dir / f"{episode_id}.json"
+        return sorted(timestamps)
+
+    def load_manifest(self, timestamp: str) -> Optional[Dict[str, Any]]:
+        """Load a manifest by timestamp."""
+        path = self.manifests_dir / f"{timestamp}.json"
         if not path.exists():
-            raise FileNotFoundError(f"episode_not_found: {path}")
+            return None
 
         return json.loads(path.read_text(encoding="utf-8"))
+
+    # ---------- sync cursor ----------
+
+    def load_sync_cursor(self) -> Optional[Dict[str, Any]]:
+        """
+        Load the sync cursor (last synced manifest timestamp).
+        Returns None if no cursor exists (first run).
+        """
+        path = self.manifests_dir / "sync-cursor.json"
+        if not path.exists():
+            return None
+
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def save_sync_cursor(self, data: Dict[str, Any]) -> None:
+        """
+        Save the sync cursor.
+
+        Expected format:
+        {
+            "last_synced_manifest": "2026-01-18T11-00-00Z",
+            "last_synced_at": "2026-01-18T11:05:00Z"
+        }
+        """
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        path = self.manifests_dir / "sync-cursor.json"
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(
+            "sync_cursor_saved",
+            extra={"last_synced_manifest": data.get("last_synced_manifest")},
+        )
