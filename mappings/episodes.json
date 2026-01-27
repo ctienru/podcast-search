@@ -1,0 +1,183 @@
+{
+  "settings": {
+    "analysis": {
+      "filter": {
+        "edge_ngram_filter": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 20
+        }
+      },
+      "analyzer": {
+        "autocomplete_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "edge_ngram_filter"]
+        },
+        "autocomplete_search": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "dynamic_templates": [
+      {
+        "external_ids_keywords": {
+          "path_match": "external_ids.*",
+          "mapping": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      {
+        "external_urls_keywords": {
+          "path_match": "external_urls.*",
+          "mapping": {
+            "type": "keyword",
+            "index": false,
+            "ignore_above": 512
+          }
+        }
+      },
+      {
+        "show_external_ids_keywords": {
+          "path_match": "show.external_ids.*",
+          "mapping": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      }
+    ],
+    "properties": {
+      "episode_id": {
+        "type": "keyword"
+      },
+
+      "external_ids": {
+        "type": "object",
+        "dynamic": true
+      },
+
+      "external_urls": {
+        "type": "object",
+        "dynamic": true
+      },
+
+      "title": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "autocomplete": {
+            "type": "text",
+            "analyzer": "autocomplete_analyzer",
+            "search_analyzer": "autocomplete_search"
+          },
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+
+      "description": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+
+      "language": {
+        "type": "keyword"
+      },
+
+      "published_at": {
+        "type": "date"
+      },
+
+      "duration_sec": {
+        "type": "integer"
+      },
+
+      "image_url": {
+        "type": "keyword",
+        "index": false
+      },
+
+      "audio": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "url": {
+            "type": "keyword",
+            "index": false
+          },
+          "type": {
+            "type": "keyword"
+          },
+          "length_bytes": {
+            "type": "long"
+          }
+        }
+      },
+
+      "show": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "show_id": {
+            "type": "keyword"
+          },
+
+          "external_ids": {
+            "type": "object",
+            "dynamic": true
+          },
+
+          "title": {
+            "type": "text",
+            "analyzer": "standard",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+
+          "publisher": {
+            "type": "text",
+            "analyzer": "standard",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+
+          "image_url": {
+            "type": "keyword",
+            "index": false
+          },
+
+          "external_urls": {
+            "type": "object",
+            "dynamic": true
+          }
+        }
+      },
+
+      "created_at": {
+        "type": "date"
+      },
+
+      "updated_at": {
+        "type": "date"
+      }
+    }
+  }
+}
