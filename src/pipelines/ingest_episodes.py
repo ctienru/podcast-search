@@ -151,29 +151,40 @@ class IngestEpisodesPipeline:
         # Parse duration to seconds
         duration_sec = parse_duration(original_meta.get("duration"))
 
+        # Build source document
+        source = {
+            "episode_id": episode_id,
+
+            # Content (from cleaned)
+            "title": normalized.get("title"),
+            "description": normalized.get("description"),
+
+            # Metadata (from original_meta)
+            "published_at": parse_pub_date(original_meta.get("pub_date")),
+            "duration_sec": duration_sec,
+            "language": normalize_language(original_meta.get("language")),
+
+            # Audio
+            "audio": {
+                "url": original_meta.get("audio_url"),
+            },
+
+            # Show (embedded from show cache)
+            "show": show_obj,
+        }
+
+        # Add new RSS fields if present
+        if original_meta.get("itunes_summary"):
+            source["itunes_summary"] = original_meta["itunes_summary"]
+        if original_meta.get("creator"):
+            source["creator"] = original_meta["creator"]
+        if original_meta.get("episode_type"):
+            source["episode_type"] = original_meta["episode_type"]
+
         return {
             "_index": self.INDEX_ALIAS,
             "_id": episode_id,
-            "_source": {
-                "episode_id": episode_id,
-
-                # Content (from cleaned)
-                "title": normalized.get("title"),
-                "description": normalized.get("description"),
-
-                # Metadata (from original_meta)
-                "published_at": parse_pub_date(original_meta.get("pub_date")),
-                "duration_sec": duration_sec,
-                "language": normalize_language(original_meta.get("language")),
-
-                # Audio
-                "audio": {
-                    "url": original_meta.get("audio_url"),
-                },
-
-                # Show (embedded from show cache)
-                "show": show_obj,
-            },
+            "_source": source,
         }
 
     # ---------- bulk ----------

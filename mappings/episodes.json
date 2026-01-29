@@ -90,6 +90,26 @@
         "analyzer": "standard"
       },
 
+      "itunes_summary": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+
+      "creator": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+
+      "episode_type": {
+        "type": "keyword"
+      },
+
       "embedding": {
         "type": "dense_vector",
         "dims": 384,

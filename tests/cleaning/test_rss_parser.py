@@ -18,7 +18,8 @@ def sample_rss_xml():
     return """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"
      xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
-     xmlns:content="http://purl.org/rss/1.0/modules/content/">
+     xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
     <title>Test Podcast</title>
     <description>A test podcast description</description>
@@ -30,6 +31,9 @@ def sample_rss_xml():
       <title>Episode 1: Pilot</title>
       <guid>guid-episode-1</guid>
       <description>First episode description</description>
+      <itunes:summary>Clean summary for episode 1</itunes:summary>
+      <dc:creator>John Doe</dc:creator>
+      <itunes:episodeType>full</itunes:episodeType>
       <content:encoded><![CDATA[<p>Rich <strong>content</strong> for episode 1</p>]]></content:encoded>
       <pubDate>Mon, 01 Jan 2024 10:00:00 +0000</pubDate>
       <itunes:duration>30:00</itunes:duration>
@@ -40,6 +44,7 @@ def sample_rss_xml():
       <title>Episode 2: Second</title>
       <guid>guid-episode-2</guid>
       <description>Second episode description</description>
+      <itunes:episodeType>trailer</itunes:episodeType>
       <pubDate>Mon, 08 Jan 2024 10:00:00 +0000</pubDate>
       <itunes:duration>45:30</itunes:duration>
       <enclosure url="https://example.com/ep2.mp3" type="audio/mpeg" length="23456789"/>
@@ -210,6 +215,10 @@ class TestParseEpisode:
             assert ep.audio_url is None
             assert ep.audio_type is None
             assert ep.audio_length is None
+            # New fields should also be None
+            assert ep.itunes_summary is None
+            assert ep.creator is None
+            assert ep.episode_type is None
         finally:
             temp_path.unlink()
 
@@ -423,3 +432,98 @@ class TestNamespaces:
 
         assert episodes[0].duration == "30:00"
         assert episodes[1].duration == "45:30"
+
+
+class TestNewRssFields:
+    """Test new RSS fields (itunes:summary, dc:creator, itunes:episodeType)."""
+
+    def test_parses_itunes_summary(self, parser, temp_rss_file):
+        """Test parsing itunes:summary element."""
+        show, episodes = parser.parse_file(temp_rss_file)
+
+        assert episodes[0].itunes_summary == "Clean summary for episode 1"
+        # Episode 2 doesn't have itunes:summary
+        assert episodes[1].itunes_summary is None
+
+    def test_parses_dc_creator(self, parser, temp_rss_file):
+        """Test parsing dc:creator element."""
+        show, episodes = parser.parse_file(temp_rss_file)
+
+        assert episodes[0].creator == "John Doe"
+        # Episode 2 doesn't have dc:creator
+        assert episodes[1].creator is None
+
+    def test_parses_episode_type(self, parser, temp_rss_file):
+        """Test parsing itunes:episodeType element."""
+        show, episodes = parser.parse_file(temp_rss_file)
+
+        assert episodes[0].episode_type == "full"
+        assert episodes[1].episode_type == "trailer"
+
+    def test_new_fields_optional(self, parser):
+        """Test that new fields are optional."""
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Minimal Podcast</title>
+    <item>
+      <title>Episode</title>
+      <guid>guid-1</guid>
+    </item>
+  </channel>
+</rss>"""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(xml_content)
+            temp_path = Path(f.name)
+
+        try:
+            show, episodes = parser.parse_file(temp_path)
+            ep = episodes[0]
+
+            assert ep.itunes_summary is None
+            assert ep.creator is None
+            assert ep.episode_type is None
+        finally:
+            temp_path.unlink()
+
+    def test_episode_type_values(self, parser):
+        """Test different itunes:episodeType values."""
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Test</title>
+    <item>
+      <title>Full Episode</title>
+      <guid>guid-full</guid>
+      <itunes:episodeType>full</itunes:episodeType>
+    </item>
+    <item>
+      <title>Trailer</title>
+      <guid>guid-trailer</guid>
+      <itunes:episodeType>trailer</itunes:episodeType>
+    </item>
+    <item>
+      <title>Bonus</title>
+      <guid>guid-bonus</guid>
+      <itunes:episodeType>bonus</itunes:episodeType>
+    </item>
+  </channel>
+</rss>"""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(xml_content)
+            temp_path = Path(f.name)
+
+        try:
+            show, episodes = parser.parse_file(temp_path)
+
+            assert episodes[0].episode_type == "full"
+            assert episodes[1].episode_type == "trailer"
+            assert episodes[2].episode_type == "bonus"
+        finally:
+            temp_path.unlink()

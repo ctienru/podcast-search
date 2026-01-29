@@ -205,6 +205,9 @@ class CleanEpisodesPipeline:
             "duration": episode.duration,
             "audio_url": episode.audio_url,
             "language": language,  # From RSS <language> tag
+            "itunes_summary": episode.itunes_summary,
+            "creator": episode.creator,
+            "episode_type": episode.episode_type,
         }
 
         return result
