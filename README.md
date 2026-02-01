@@ -147,7 +147,41 @@ python -m src.pipelines.build_embedding_input
 python -m src.pipelines.embed_and_ingest --batch-size 64
 ```
 
-### 5. Verify Results
+**Full Reindex (one-liner)**:
+
+```bash
+python -m src.pipelines.create_indices && \
+python -m src.pipelines.ingest_shows && \
+python -m src.pipelines.clean_episodes && \
+python -m src.pipelines.build_embedding_input && \
+python -m src.pipelines.embed_and_ingest --batch-size 64
+```
+
+### 5. Run Evaluation
+
+After indexing, run evaluation to validate search quality:
+
+```bash
+# No-Annotation evaluation (Extraneous, Stability, Dominance)
+python -m src.pipelines.evaluate_search
+
+# BM25 vs kNN vs Hybrid comparison (Jaccard analysis)
+python scripts/compare_search_methods.py --output data/evaluation/method_comparison.json
+```
+
+**Full Reindex + Evaluate**:
+
+```bash
+python -m src.pipelines.create_indices && \
+python -m src.pipelines.ingest_shows && \
+python -m src.pipelines.clean_episodes && \
+python -m src.pipelines.build_embedding_input && \
+python -m src.pipelines.embed_and_ingest --batch-size 64 && \
+python -m src.pipelines.evaluate_search && \
+python scripts/compare_search_methods.py --output data/evaluation/method_comparison.json
+```
+
+### 6. Verify Results
 
 In Kibana Dev Tools:
 
