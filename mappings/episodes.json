@@ -6,18 +6,41 @@
           "type": "edge_ngram",
           "min_gram": 2,
           "max_gram": 20
+        },
+        "t2s_convert": {
+          "type": "stconvert",
+          "convert_type": "t2s"
         }
       },
       "analyzer": {
         "autocomplete_analyzer": {
           "type": "custom",
           "tokenizer": "standard",
-          "filter": ["lowercase", "edge_ngram_filter"]
+          "filter": [
+            "lowercase",
+            "edge_ngram_filter"
+          ]
         },
         "autocomplete_search": {
           "type": "custom",
           "tokenizer": "standard",
-          "filter": ["lowercase"]
+          "filter": [
+            "lowercase"
+          ]
+        },
+        "ik_index_analyzer": {
+          "type": "custom",
+          "tokenizer": "ik_max_word",
+          "filter": [
+            "t2s_convert"
+          ]
+        },
+        "ik_search_analyzer": {
+          "type": "custom",
+          "tokenizer": "ik_smart",
+          "filter": [
+            "t2s_convert"
+          ]
         }
       }
     }
@@ -58,17 +81,14 @@
       "episode_id": {
         "type": "keyword"
       },
-
       "external_ids": {
         "type": "object",
         "dynamic": true
       },
-
       "external_urls": {
         "type": "object",
         "dynamic": true
       },
-
       "title": {
         "type": "text",
         "analyzer": "standard",
@@ -78,23 +98,32 @@
             "analyzer": "autocomplete_analyzer",
             "search_analyzer": "autocomplete_search"
           },
+          "chinese": {
+            "type": "text",
+            "analyzer": "ik_index_analyzer",
+            "search_analyzer": "ik_search_analyzer"
+          },
           "keyword": {
             "type": "keyword",
             "ignore_above": 256
           }
         }
       },
-
       "description": {
         "type": "text",
-        "analyzer": "standard"
+        "analyzer": "standard",
+        "fields": {
+          "chinese": {
+            "type": "text",
+            "analyzer": "ik_index_analyzer",
+            "search_analyzer": "ik_search_analyzer"
+          }
+        }
       },
-
       "itunes_summary": {
         "type": "text",
         "analyzer": "standard"
       },
-
       "creator": {
         "type": "text",
         "analyzer": "standard",
@@ -105,35 +134,47 @@
           }
         }
       },
-
       "episode_type": {
         "type": "keyword"
       },
-
+      "chapters": {
+        "type": "nested",
+        "properties": {
+          "start": {
+            "type": "keyword"
+          },
+          "title": {
+            "type": "text",
+            "analyzer": "standard",
+            "fields": {
+              "chinese": {
+                "type": "text",
+                "analyzer": "ik_index_analyzer",
+                "search_analyzer": "ik_search_analyzer"
+              }
+            }
+          }
+        }
+      },
       "embedding": {
         "type": "dense_vector",
         "dims": 384,
         "index": true,
         "similarity": "cosine"
       },
-
       "language": {
         "type": "keyword"
       },
-
       "published_at": {
         "type": "date"
       },
-
       "duration_sec": {
         "type": "integer"
       },
-
       "image_url": {
         "type": "keyword",
         "index": false
       },
-
       "audio": {
         "type": "object",
         "dynamic": "strict",
@@ -150,7 +191,6 @@
           }
         }
       },
-
       "show": {
         "type": "object",
         "dynamic": "strict",
@@ -158,50 +198,53 @@
           "show_id": {
             "type": "keyword"
           },
-
           "external_ids": {
             "type": "object",
             "dynamic": true
           },
-
           "title": {
             "type": "text",
             "analyzer": "standard",
             "fields": {
+              "chinese": {
+                "type": "text",
+                "analyzer": "ik_index_analyzer",
+                "search_analyzer": "ik_search_analyzer"
+              },
               "keyword": {
                 "type": "keyword",
                 "ignore_above": 256
               }
             }
           },
-
           "publisher": {
             "type": "text",
             "analyzer": "standard",
             "fields": {
+              "chinese": {
+                "type": "text",
+                "analyzer": "ik_index_analyzer",
+                "search_analyzer": "ik_search_analyzer"
+              },
               "keyword": {
                 "type": "keyword",
                 "ignore_above": 256
               }
             }
           },
-
           "image_url": {
             "type": "keyword",
             "index": false
           },
-
           "external_urls": {
             "type": "object",
             "dynamic": true
           }
         }
       },
-
       "created_at": {
         "type": "date"
       },
-
       "updated_at": {
         "type": "date"
       }

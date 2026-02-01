@@ -208,6 +208,7 @@ class CleanEpisodesPipeline:
             "itunes_summary": episode.itunes_summary,
             "creator": episode.creator,
             "episode_type": episode.episode_type,
+            "chapters": episode.chapters,  # PSC chapters
         }
 
         return result

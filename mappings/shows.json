@@ -1,4 +1,41 @@
 {
+  "settings": {
+    "analysis": {
+      "filter": {
+        "t2s_convert": {
+          "type": "stconvert",
+          "convert_type": "t2s"
+        },
+        "edge_ngram_filter": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 20
+        }
+      },
+      "analyzer": {
+        "ik_index_analyzer": {
+          "type": "custom",
+          "tokenizer": "ik_max_word",
+          "filter": ["t2s_convert"]
+        },
+        "ik_search_analyzer": {
+          "type": "custom",
+          "tokenizer": "ik_smart",
+          "filter": ["t2s_convert"]
+        },
+        "autocomplete_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "edge_ngram_filter"]
+        },
+        "autocomplete_search": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase"]
+        }
+      }
+    }
+  },
   "mappings": {
     "dynamic": "strict",
     "dynamic_templates": [
@@ -41,6 +78,16 @@
         "type": "text",
         "analyzer": "standard",
         "fields": {
+          "autocomplete": {
+            "type": "text",
+            "analyzer": "autocomplete_analyzer",
+            "search_analyzer": "autocomplete_search"
+          },
+          "chinese": {
+            "type": "text",
+            "analyzer": "ik_index_analyzer",
+            "search_analyzer": "ik_search_analyzer"
+          },
           "keyword": {
             "type": "keyword",
             "ignore_above": 256
@@ -52,11 +99,69 @@
         "type": "text",
         "analyzer": "standard",
         "fields": {
+          "autocomplete": {
+            "type": "text",
+            "analyzer": "autocomplete_analyzer",
+            "search_analyzer": "autocomplete_search"
+          },
+          "chinese": {
+            "type": "text",
+            "analyzer": "ik_index_analyzer",
+            "search_analyzer": "ik_search_analyzer"
+          },
           "keyword": {
             "type": "keyword",
             "ignore_above": 256
           }
         }
+      },
+
+      "description": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "chinese": {
+            "type": "text",
+            "analyzer": "ik_index_analyzer",
+            "search_analyzer": "ik_search_analyzer"
+          }
+        }
+      },
+
+      "subtitle": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "chinese": {
+            "type": "text",
+            "analyzer": "ik_index_analyzer",
+            "search_analyzer": "ik_search_analyzer"
+          }
+        }
+      },
+
+      "categories": {
+        "type": "keyword"
+      },
+
+      "explicit": {
+        "type": "boolean"
+      },
+
+      "show_type": {
+        "type": "keyword"
+      },
+
+      "website_url": {
+        "type": "keyword",
+        "index": false
+      },
+
+      "embedding": {
+        "type": "dense_vector",
+        "dims": 384,
+        "index": true,
+        "similarity": "cosine"
       },
 
       "language": {

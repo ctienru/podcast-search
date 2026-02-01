@@ -527,3 +527,186 @@ class TestNewRssFields:
             assert episodes[2].episode_type == "bonus"
         finally:
             temp_path.unlink()
+
+
+class TestChapters:
+    """Test PSC (Podlove Simple Chapters) parsing."""
+
+    def test_parses_psc_chapters(self, parser):
+        """Test parsing psc:chapters element."""
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:psc="http://podlove.org/simple-chapters">
+  <channel>
+    <title>Test Podcast</title>
+    <item>
+      <title>Episode with Chapters</title>
+      <guid>guid-chapters</guid>
+      <psc:chapters>
+        <psc:chapter start="00:00:00" title="Introduction" />
+        <psc:chapter start="00:05:30" title="Main Topic" />
+        <psc:chapter start="00:45:00" title="Conclusion" />
+      </psc:chapters>
+    </item>
+  </channel>
+</rss>"""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(xml_content)
+            temp_path = Path(f.name)
+
+        try:
+            show, episodes = parser.parse_file(temp_path)
+            ep = episodes[0]
+
+            assert ep.chapters is not None
+            assert len(ep.chapters) == 3
+
+            assert ep.chapters[0]["start"] == "00:00:00"
+            assert ep.chapters[0]["title"] == "Introduction"
+
+            assert ep.chapters[1]["start"] == "00:05:30"
+            assert ep.chapters[1]["title"] == "Main Topic"
+
+            assert ep.chapters[2]["start"] == "00:45:00"
+            assert ep.chapters[2]["title"] == "Conclusion"
+        finally:
+            temp_path.unlink()
+
+    def test_no_chapters_returns_none(self, parser):
+        """Test that episodes without chapters return None."""
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Test Podcast</title>
+    <item>
+      <title>Episode without Chapters</title>
+      <guid>guid-no-chapters</guid>
+    </item>
+  </channel>
+</rss>"""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(xml_content)
+            temp_path = Path(f.name)
+
+        try:
+            show, episodes = parser.parse_file(temp_path)
+            ep = episodes[0]
+
+            assert ep.chapters is None
+        finally:
+            temp_path.unlink()
+
+    def test_empty_chapters_returns_none(self, parser):
+        """Test that empty psc:chapters element returns None."""
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:psc="http://podlove.org/simple-chapters">
+  <channel>
+    <title>Test Podcast</title>
+    <item>
+      <title>Episode</title>
+      <guid>guid-empty</guid>
+      <psc:chapters>
+      </psc:chapters>
+    </item>
+  </channel>
+</rss>"""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(xml_content)
+            temp_path = Path(f.name)
+
+        try:
+            show, episodes = parser.parse_file(temp_path)
+            ep = episodes[0]
+
+            assert ep.chapters is None
+        finally:
+            temp_path.unlink()
+
+    def test_chapters_with_unicode_titles(self, parser):
+        """Test parsing chapters with Unicode titles."""
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:psc="http://podlove.org/simple-chapters">
+  <channel>
+    <title>測試 Podcast</title>
+    <item>
+      <title>Episode</title>
+      <guid>guid-unicode</guid>
+      <psc:chapters>
+        <psc:chapter start="00:00:00" title="前言" />
+        <psc:chapter start="00:10:00" title="主題：人工智慧的未來" />
+        <psc:chapter start="00:55:00" title="結語 🎙️" />
+      </psc:chapters>
+    </item>
+  </channel>
+</rss>"""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(xml_content)
+            temp_path = Path(f.name)
+
+        try:
+            show, episodes = parser.parse_file(temp_path)
+            ep = episodes[0]
+
+            assert ep.chapters is not None
+            assert len(ep.chapters) == 3
+            assert ep.chapters[0]["title"] == "前言"
+            assert "人工智慧" in ep.chapters[1]["title"]
+            assert "🎙️" in ep.chapters[2]["title"]
+        finally:
+            temp_path.unlink()
+
+    def test_chapters_skips_invalid_entries(self, parser):
+        """Test that chapters without start or title are skipped."""
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:psc="http://podlove.org/simple-chapters">
+  <channel>
+    <title>Test Podcast</title>
+    <item>
+      <title>Episode</title>
+      <guid>guid-invalid</guid>
+      <psc:chapters>
+        <psc:chapter start="00:00:00" title="Valid Chapter" />
+        <psc:chapter title="Missing Start" />
+        <psc:chapter start="00:10:00" />
+        <psc:chapter start="00:20:00" title="Another Valid" />
+      </psc:chapters>
+    </item>
+  </channel>
+</rss>"""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(xml_content)
+            temp_path = Path(f.name)
+
+        try:
+            show, episodes = parser.parse_file(temp_path)
+            ep = episodes[0]
+
+            assert ep.chapters is not None
+            assert len(ep.chapters) == 2  # Only valid entries
+            assert ep.chapters[0]["title"] == "Valid Chapter"
+            assert ep.chapters[1]["title"] == "Another Valid"
+        finally:
+            temp_path.unlink()
+
+    def test_psc_namespace_registered(self):
+        """Test that PSC namespace is registered."""
+        assert "psc" in NAMESPACES
+        assert NAMESPACES["psc"] == "http://podlove.org/simple-chapters"
