@@ -1,10 +1,11 @@
 """
 Search Service
 
-Supports three search modes:
-1. BM25 - Pure text search
-2. kNN - Pure semantic search
-3. Hybrid - BM25 + kNN + RRF fusion
+Supports four search modes:
+1. BM25 - Pure text search (fuzzy matching)
+2. kNN - Pure semantic search (embedding similarity)
+3. Hybrid - BM25 + kNN + RRF fusion (recommended)
+4. Exact - Phrase matching (match_phrase for precise results)
 
 Usage:
     from src.services.search_service import SearchService
@@ -19,6 +20,9 @@ Usage:
 
     # Hybrid search (recommended)
     results = service.search_hybrid("podcast about AI", size=10)
+
+    # Exact phrase matching
+    results = service.search_exact("AI podcast", size=10)
 """
 
 import logging
@@ -36,6 +40,7 @@ class SearchMode(Enum):
     BM25 = "bm25"
     KNN = "knn"
     HYBRID = "hybrid"
+    EXACT = "exact"
 
 
 @dataclass
@@ -93,8 +98,37 @@ class SearchService:
             self._encoder = EmbeddingEncoder()
         return self._encoder
 
-    def _build_bm25_query(self, query: str) -> Dict[str, Any]:
-        """Build BM25 query for text matching."""
+    def _build_bm25_query(
+        self,
+        query: str,
+        evaluation_mode: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Build BM25 query for text matching.
+
+        Args:
+            query: Search query text
+            evaluation_mode: If True, use evaluation-safe query
+                (no time_decay, no language filter, no match_phrase boost)
+        """
+        if evaluation_mode:
+            # Evaluation-safe: no match_phrase boost, no filters
+            return {
+                "bool": {
+                    "should": [
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": ["title^3", "title.chinese^3", "description", "description.chinese"],
+                                "type": "best_fields",
+                            }
+                        },
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+
+        # Production query with match_phrase boost
         return {
             "bool": {
                 "should": [
@@ -110,6 +144,46 @@ class SearchService:
                             "title": {
                                 "query": query,
                                 "boost": 2,
+                            }
+                        }
+                    },
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+
+    def _build_exact_query(self, query: str) -> Dict[str, Any]:
+        """Build exact match query using match_phrase for precise phrase matching."""
+        return {
+            "bool": {
+                "should": [
+                    {
+                        "match_phrase": {
+                            "title": {
+                                "query": query,
+                                "boost": 3,
+                            }
+                        }
+                    },
+                    {
+                        "match_phrase": {
+                            "title.chinese": {
+                                "query": query,
+                                "boost": 3,
+                            }
+                        }
+                    },
+                    {
+                        "match_phrase": {
+                            "description": {
+                                "query": query,
+                            }
+                        }
+                    },
+                    {
+                        "match_phrase": {
+                            "description.chinese": {
+                                "query": query,
                             }
                         }
                     },
@@ -155,6 +229,7 @@ class SearchService:
         self,
         query: str,
         size: int = 10,
+        evaluation_mode: bool = False,
     ) -> SearchResponse:
         """
         Pure BM25 text search.
@@ -162,12 +237,14 @@ class SearchService:
         Args:
             query: Search query text
             size: Number of results to return
+            evaluation_mode: If True, use evaluation-safe query
+                (no time_decay, no language filter, no match_phrase boost)
 
         Returns:
             SearchResponse with results
         """
         body = {
-            "query": self._build_bm25_query(query),
+            "query": self._build_bm25_query(query, evaluation_mode=evaluation_mode),
             "size": size,
             "_source": [
                 "episode_id", "title", "description",
@@ -189,6 +266,7 @@ class SearchService:
                 "results": len(results),
                 "total": total,
                 "took_ms": took,
+                "evaluation_mode": evaluation_mode,
             },
         )
 
@@ -197,6 +275,58 @@ class SearchService:
             total=total,
             took_ms=took,
             mode=SearchMode.BM25,
+        )
+
+    def search_exact(
+        self,
+        query: str,
+        size: int = 10,
+    ) -> SearchResponse:
+        """
+        Exact phrase match search using match_phrase.
+
+        This mode is designed for users who want to find exact phrase matches
+        rather than fuzzy text matching. Useful for finding specific podcast
+        titles or exact quotes.
+
+        Args:
+            query: Search query text (will be matched as exact phrase)
+            size: Number of results to return
+
+        Returns:
+            SearchResponse with results
+        """
+        body = {
+            "query": self._build_exact_query(query),
+            "size": size,
+            "_source": [
+                "episode_id", "title", "description",
+                "show", "published_at", "duration_sec"
+            ],
+        }
+
+        response = self.client.search(index=self.INDEX, body=body)
+
+        hits = response.get("hits", {})
+        results = self._parse_hits(hits.get("hits", []))
+        total = hits.get("total", {}).get("value", 0)
+        took = response.get("took", 0)
+
+        logger.info(
+            "search_exact",
+            extra={
+                "query": query,
+                "results": len(results),
+                "total": total,
+                "took_ms": took,
+            },
+        )
+
+        return SearchResponse(
+            results=results,
+            total=total,
+            took_ms=took,
+            mode=SearchMode.EXACT,
         )
 
     def search_knn(
@@ -387,7 +517,7 @@ class SearchService:
 
         Args:
             query: Search query text
-            mode: Search mode (BM25, KNN, or HYBRID)
+            mode: Search mode (BM25, KNN, HYBRID, or EXACT)
             size: Number of results to return
             **kwargs: Additional arguments for specific search modes
 
@@ -398,5 +528,7 @@ class SearchService:
             return self.search_bm25(query, size=size)
         elif mode == SearchMode.KNN:
             return self.search_knn(query, size=size)
+        elif mode == SearchMode.EXACT:
+            return self.search_exact(query, size=size)
         else:
             return self.search_hybrid(query, size=size, **kwargs)
