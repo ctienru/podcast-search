@@ -78,6 +78,14 @@ class IngestShowsPipeline:
                 # ---- content ----
                 "title": show.get("title"),
                 "publisher": show.get("author"),
+                "description": show.get("description"),
+                "subtitle": show.get("subtitle"),
+
+                # ---- metadata ----
+                "categories": show.get("categories"),
+                "explicit": show.get("explicit"),
+                "show_type": show.get("show_type"),
+                "website_url": show.get("website_url"),
 
                 "language": show.get("language"),
 
