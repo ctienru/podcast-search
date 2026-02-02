@@ -43,6 +43,7 @@ class RawEpisode:
     creator: Optional[str]  # <dc:creator> - author/host
     episode_type: Optional[str]  # <itunes:episodeType> - full/trailer/bonus
     chapters: Optional[list[dict]]  # PSC chapters - [{"start": "HH:MM:SS", "title": "..."}]
+    image_url: Optional[str]  # <itunes:image> - episode-specific image
 
 
 @dataclass
@@ -162,6 +163,7 @@ class RSSParser:
             creator=self._get_text(item, "dc:creator", NAMESPACES),
             episode_type=self._get_text(item, "itunes:episodeType", NAMESPACES),
             chapters=self._parse_chapters(item),
+            image_url=self._get_itunes_image(item),
         )
 
     def _generate_episode_id(self, show_id: str, guid: str) -> str:

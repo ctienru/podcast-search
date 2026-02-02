@@ -234,6 +234,14 @@ class EmbedAndIngestPipeline:
                     show_obj["title"] = show_data.get("title")
                     show_obj["publisher"] = show_data.get("author")
 
+                    # Add image_url from image.url
+                    image = show_data.get("image") or {}
+                    show_obj["image_url"] = image.get("url")
+
+                    # Add external_urls
+                    external_urls = show_data.get("external_urls") or {}
+                    show_obj["external_urls"] = external_urls
+
         now = datetime.now(timezone.utc).isoformat()
 
         return {

@@ -59,6 +59,14 @@ class IngestShowsPipeline:
         # Use provider from show data, default to "apple_podcasts" for backward compatibility
         provider = show.get("provider", "apple_podcasts")
 
+        # Map provider to external_urls key (crawler uses different naming)
+        # crawler: {"provider": "apple", "external_urls": {"apple_podcasts": "..."}}
+        external_url_key_map = {
+            "apple": "apple_podcasts",
+        }
+        external_url_key = external_url_key_map.get(provider, provider)
+        external_url = external_urls.get(external_url_key)
+
         return {
             "_index": self.INDEX_ALIAS,
             "_id": show["show_id"],
@@ -72,7 +80,7 @@ class IngestShowsPipeline:
 
                 # ---- external urls ----
                 "external_urls": {
-                    provider: external_urls.get(provider),
+                    provider: external_url,
                 },
 
                 # ---- content ----

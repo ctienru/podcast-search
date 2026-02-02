@@ -163,6 +163,7 @@ class IngestEpisodesPipeline:
             "published_at": parse_pub_date(original_meta.get("pub_date")),
             "duration_sec": duration_sec,
             "language": normalize_language(original_meta.get("language")),
+            "image_url": original_meta.get("image_url"),
 
             # Audio
             "audio": {
