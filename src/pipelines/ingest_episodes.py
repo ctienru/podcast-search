@@ -7,11 +7,14 @@ Source: data/cleaned/episodes/*.json
 Target: Elasticsearch episodes index
 """
 
+import html
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
+from bs4 import BeautifulSoup
 from elasticsearch.helpers import streaming_bulk
 
 from src.config.settings import PROJECT_ROOT
@@ -77,6 +80,50 @@ class IngestEpisodesPipeline:
         """Get show data from cache."""
         return self._show_cache.get(show_id)
 
+    @staticmethod
+    def _clean_html(text: Optional[str]) -> Optional[str]:
+        """
+        Clean HTML from text, converting to plain text.
+
+        - Removes HTML tags
+        - Decodes HTML entities
+        - Converts <p> and <br> tags to newlines
+        - Normalizes whitespace
+
+        Returns None if text is None or empty after cleaning.
+        """
+        if not text:
+            return None
+
+        # Replace closing </p> tags with newlines to preserve paragraph structure
+        text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
+
+        # Replace <br> and <br/> tags with newlines
+        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+
+        soup = BeautifulSoup(text, "html.parser")
+
+        # Remove script and style elements
+        for element in soup(["script", "style"]):
+            element.decompose()
+
+        # Get text (BeautifulSoup automatically decodes HTML entities)
+        text = soup.get_text()
+
+        # Normalize whitespace
+        # Remove excessive horizontal whitespace (but preserve newlines)
+        text = re.sub(r"[^\S\n]+", " ", text)
+
+        # Multiple newlines → double newline (paragraph separator)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
+        # Strip each line
+        lines = [line.strip() for line in text.split("\n")]
+        text = "\n".join(lines).strip()
+
+        # Return None if empty after cleaning
+        return text if text else None
+
     # ---------- load ----------
 
     def list_cleaned_episode_files(self) -> list[Path]:
@@ -120,12 +167,53 @@ class IngestEpisodesPipeline:
                 "audio_url": "..."
             }
         }
+
+        Also supports raw episode format (for testing):
+        {
+            "episode_id": "...",
+            "show_id": "...",
+            "title": "...",
+            "description": "...",
+            "published_at": "...",
+            ...
+        }
         """
         episode_id = cleaned_episode["episode_id"]
-        show_id = cleaned_episode["show_id"]
-        cleaned = cleaned_episode.get("cleaned", {})
-        normalized = cleaned.get("normalized", {})
-        original_meta = cleaned_episode.get("original_meta", {})
+        show_id = cleaned_episode.get("show_id")
+
+        # Determine if this is a cleaned episode or raw episode
+        if "cleaned" in cleaned_episode:
+            # Cleaned episode format
+            cleaned = cleaned_episode.get("cleaned", {})
+            normalized = cleaned.get("normalized", {})
+            original_meta = cleaned_episode.get("original_meta", {})
+
+            title = normalized.get("title")
+            description = normalized.get("description")
+            published_at = parse_pub_date(original_meta.get("pub_date"))
+            duration_sec = parse_duration(original_meta.get("duration"))
+            language = normalize_language(original_meta.get("language"))
+            image_url = original_meta.get("image_url")
+            audio_url = original_meta.get("audio_url")
+            audio_type = original_meta.get("audio_type")
+            audio_length = original_meta.get("audio_length")
+        else:
+            # Raw episode format (for testing)
+            title = cleaned_episode.get("title")
+            description = self._clean_html(cleaned_episode.get("description"))
+            published_at = cleaned_episode.get("published_at")
+            duration_sec = cleaned_episode.get("duration_sec")
+            language = cleaned_episode.get("language")
+
+            # Handle image
+            image = cleaned_episode.get("image") or {}
+            image_url = image.get("url") if isinstance(image, dict) else None
+
+            # Handle audio
+            audio = cleaned_episode.get("audio") or {}
+            audio_url = audio.get("url") if isinstance(audio, dict) else None
+            audio_type = audio.get("type") if isinstance(audio, dict) else None
+            audio_length = audio.get("length_bytes") if isinstance(audio, dict) else None
 
         # Load show data from cache
         show_data = self._get_show_data(show_id) if show_id else None
@@ -148,32 +236,49 @@ class IngestEpisodesPipeline:
             if external_urls:
                 show_obj["external_urls"] = external_urls
 
-        # Parse duration to seconds
-        duration_sec = parse_duration(original_meta.get("duration"))
+        # Build source document
+        source = {
+            "episode_id": episode_id,
+
+            # Content
+            "title": title,
+            "description": description,
+
+            # Metadata
+            "published_at": published_at,
+            "duration_sec": duration_sec,
+            "language": language,
+            "image_url": image_url,
+
+            # Audio
+            "audio": {
+                "url": audio_url,
+            },
+
+            # Show (embedded from show cache)
+            "show": show_obj,
+        }
+
+        # Add audio metadata if present
+        if audio_type:
+            source["audio"]["type"] = audio_type
+        if audio_length:
+            source["audio"]["length_bytes"] = audio_length
+
+        # Add new RSS fields if present (from cleaned format)
+        if "cleaned" in cleaned_episode:
+            original_meta = cleaned_episode.get("original_meta", {})
+            if original_meta.get("itunes_summary"):
+                source["itunes_summary"] = original_meta["itunes_summary"]
+            if original_meta.get("creator"):
+                source["creator"] = original_meta["creator"]
+            if original_meta.get("episode_type"):
+                source["episode_type"] = original_meta["episode_type"]
 
         return {
             "_index": self.INDEX_ALIAS,
             "_id": episode_id,
-            "_source": {
-                "episode_id": episode_id,
-
-                # Content (from cleaned)
-                "title": normalized.get("title"),
-                "description": normalized.get("description"),
-
-                # Metadata (from original_meta)
-                "published_at": parse_pub_date(original_meta.get("pub_date")),
-                "duration_sec": duration_sec,
-                "language": normalize_language(original_meta.get("language")),
-
-                # Audio
-                "audio": {
-                    "url": original_meta.get("audio_url"),
-                },
-
-                # Show (embedded from show cache)
-                "show": show_obj,
-            },
+            "_source": source,
         }
 
     # ---------- bulk ----------

@@ -19,6 +19,7 @@ NAMESPACES = {
     "dc": "http://purl.org/dc/elements/1.1/",
     "soundon": "http://soundon.fm/spec/podcast-1.0",
     "googleplay": "http://www.google.com/schemas/play-podcasts/1.0",
+    "psc": "http://podlove.org/simple-chapters",  # Podlove Simple Chapters
 }
 
 
@@ -38,6 +39,11 @@ class RawEpisode:
     audio_type: Optional[str]
     audio_length: Optional[int]
     link: Optional[str]
+    itunes_summary: Optional[str]  # <itunes:summary> - cleaner than description
+    creator: Optional[str]  # <dc:creator> - author/host
+    episode_type: Optional[str]  # <itunes:episodeType> - full/trailer/bonus
+    chapters: Optional[list[dict]]  # PSC chapters - [{"start": "HH:MM:SS", "title": "..."}]
+    image_url: Optional[str]  # <itunes:image> - episode-specific image
 
 
 @dataclass
@@ -152,6 +158,12 @@ class RSSParser:
             audio_type=audio_type,
             audio_length=audio_length,
             link=self._get_text(item, "link"),
+            # New RSS fields
+            itunes_summary=self._get_text(item, "itunes:summary", NAMESPACES),
+            creator=self._get_text(item, "dc:creator", NAMESPACES),
+            episode_type=self._get_text(item, "itunes:episodeType", NAMESPACES),
+            chapters=self._parse_chapters(item),
+            image_url=self._get_itunes_image(item),
         )
 
     def _generate_episode_id(self, show_id: str, guid: str) -> str:
@@ -205,6 +217,32 @@ class RSSParser:
                 return url.text.strip()
 
         return None
+
+    def _parse_chapters(self, item: ET.Element) -> Optional[list[dict]]:
+        """
+        Parse PSC (Podlove Simple Chapters) from <psc:chapters> element.
+
+        Format:
+            <psc:chapters>
+                <psc:chapter start="00:00:00" title="Introduction" />
+                <psc:chapter start="00:05:30" title="Main Topic" />
+            </psc:chapters>
+
+        Returns:
+            List of dicts with 'start' and 'title' keys, or None if no chapters
+        """
+        chapters_elem = item.find("psc:chapters", NAMESPACES)
+        if chapters_elem is None:
+            return None
+
+        chapters = []
+        for chapter_elem in chapters_elem.findall("psc:chapter", NAMESPACES):
+            start = chapter_elem.get("start")
+            title = chapter_elem.get("title")
+            if start and title:
+                chapters.append({"start": start, "title": title.strip()})
+
+        return chapters if chapters else None
 
     def parse_all(
         self, raw_rss_dir: Path

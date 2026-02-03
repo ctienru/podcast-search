@@ -1,17 +1,16 @@
 """
-Embed and Ingest Episodes Pipeline
+Embed and Ingest Shows Pipeline
 
-Read embedding_input files, generate embeddings, and write to Elasticsearch.
+Read embedding_input files for shows, generate embeddings, and write to Elasticsearch.
 
 Data sources:
-- embedding_input: data/embedding_input/episodes/*.json (text for embedding)
-- cleaned: data/cleaned/episodes/*.json (episode metadata)
-- shows: data/cleaned/shows/*.json (show metadata)
+- embedding_input: data/embedding_input/shows/*.json (text for embedding)
+- shows: canonical show data from storage
 
 Usage:
-    python -m src.pipelines.embed_and_ingest
-    python -m src.pipelines.embed_and_ingest --batch-size 64
-    python -m src.pipelines.embed_and_ingest --dry-run
+    python -m src.pipelines.embed_and_ingest_shows
+    python -m src.pipelines.embed_and_ingest_shows --batch-size 64
+    python -m src.pipelines.embed_and_ingest_shows --dry-run
 """
 
 import argparse
@@ -27,32 +26,29 @@ from src.embedding.encoder import EmbeddingEncoder
 from src.services.es_service import ElasticsearchService
 from src.storage import storage
 from src.utils.logging import setup_logging
-from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
 
 logger = logging.getLogger(__name__)
 logging.getLogger("elastic_transport").setLevel(logging.WARNING)
 logging.getLogger("elasticsearch").setLevel(logging.WARNING)
 
 
-class EmbedAndIngestPipeline:
+class EmbedAndIngestShowsPipeline:
     """
-    Pipeline to embed episode texts and ingest into Elasticsearch.
+    Pipeline to embed show texts and ingest into Elasticsearch.
 
     Data flow:
-        embedding_input/*.json + cleaned/*.json → EmbeddingEncoder → ES episodes index
+        embedding_input/*.json + canonical show data → EmbeddingEncoder → ES shows index
 
     The pipeline:
     1. Reads pre-built embedding_input files (title-weighted + truncated text)
-    2. Loads corresponding cleaned episode data for metadata
+    2. Loads canonical show data for metadata
     3. Generates embeddings using sentence-transformers
     4. Merges embedding into ES document
     5. Bulk indexes into ES
     """
 
-    INDEX_ALIAS = "episodes"
-    EMBEDDING_INPUT_DIR = Path("data/embedding_input/episodes")
-    CLEANED_EPISODES_DIR = Path("data/cleaned/episodes")
-    CLEANED_SHOWS_DIR = Path("data/cleaned/shows")
+    INDEX_ALIAS = "shows"
+    EMBEDDING_INPUT_DIR = Path("data/embedding_input/shows")
 
     def __init__(
         self,
@@ -68,9 +64,8 @@ class EmbedAndIngestPipeline:
         # Lazy load encoder (it's heavy)
         self._encoder = encoder
 
-        # Caches
+        # Cache for show data
         self._show_cache: Dict[str, Dict] = {}
-        self._cleaned_episode_cache: Dict[str, Dict] = {}
 
     @property
     def encoder(self) -> EmbeddingEncoder:
@@ -108,45 +103,12 @@ class EmbedAndIngestPipeline:
             extra={"count": loaded},
         )
 
-    def _load_cleaned_episode_cache(self) -> None:
-        """Pre-load all cleaned episode data into memory."""
-        if not self.CLEANED_EPISODES_DIR.exists():
-            logger.warning(
-                "cleaned_episodes_dir_not_found",
-                extra={"path": str(self.CLEANED_EPISODES_DIR)},
-            )
-            return
-
-        loaded = 0
-        for path in self.CLEANED_EPISODES_DIR.glob("*.json"):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    episode_data = json.load(f)
-                    episode_id = episode_data.get("episode_id")
-                    if episode_id:
-                        self._cleaned_episode_cache[episode_id] = episode_data
-                        loaded += 1
-            except Exception as e:
-                logger.warning(
-                    "cleaned_episode_load_failed",
-                    extra={"file": str(path), "error": str(e)},
-                )
-
-        logger.info(
-            "cleaned_episode_cache_loaded",
-            extra={"count": loaded},
-        )
-
     def _get_show_data(self, show_id: str) -> Optional[Dict]:
         """Get show data from cache."""
         return self._show_cache.get(show_id)
 
-    def _get_cleaned_episode(self, episode_id: str) -> Optional[Dict]:
-        """Get cleaned episode data from cache."""
-        return self._cleaned_episode_cache.get(episode_id)
-
     def list_embedding_input_files(self) -> list[Path]:
-        """List all embedding input JSON files."""
+        """List all embedding input JSON files for shows."""
         if not self.EMBEDDING_INPUT_DIR.exists():
             logger.warning(
                 "embedding_input_dir_not_found",
@@ -190,88 +152,65 @@ class EmbedAndIngestPipeline:
         embedding_vector: list[float],
     ) -> Optional[Dict]:
         """
-        Build ES document from embedding_input, cleaned episode data, and embedding vector.
-
-        Uses cleaned episode data for metadata instead of canonical storage.
+        Build ES document from embedding_input, show data, and embedding vector.
         """
-        episode_id = embedding_input["episode_id"]
-        show_id = embedding_input.get("show_id")
+        show_id = embedding_input["show_id"]
 
-        # Load cleaned episode data
-        cleaned_ep = self._get_cleaned_episode(episode_id)
-        if not cleaned_ep:
+        # Load show data from cache
+        show_data = self._get_show_data(show_id)
+        if not show_data:
             logger.warning(
-                "cleaned_episode_not_found",
-                extra={"episode_id": episode_id},
+                "show_not_found",
+                extra={"show_id": show_id},
             )
             return None
 
-        # Extract data from cleaned episode
-        normalized = cleaned_ep.get("cleaned", {}).get("normalized", {})
-        original_meta = cleaned_ep.get("original_meta", {})
-
-        title = normalized.get("title")
-        description = normalized.get("description")
-
-        # Parse metadata from original_meta
-        published_at = parse_pub_date(original_meta.get("pub_date"))
-        duration_sec = parse_duration(original_meta.get("duration"))
-        audio_url = original_meta.get("audio_url")
-        language = normalize_language(original_meta.get("language"))
-
-        # Get show data
-        show_obj = {"show_id": show_id}
-        if show_id:
-            show_data = self._get_show_data(show_id)
-            if show_data:
-                # Support both raw storage format and cleaned format
-                if "cleaned" in show_data:
-                    show_normalized = show_data.get("cleaned", {}).get("normalized", {})
-                    show_obj["title"] = show_normalized.get("title")
-                    show_obj["publisher"] = show_normalized.get("author")
-                else:
-                    # Raw storage format (title/author at top level)
-                    show_obj["title"] = show_data.get("title")
-                    show_obj["publisher"] = show_data.get("author")
-
-                    # Add image_url from image.url
-                    image = show_data.get("image") or {}
-                    show_obj["image_url"] = image.get("url")
-
-                    # Add external_urls
-                    external_urls = show_data.get("external_urls") or {}
-                    show_obj["external_urls"] = external_urls
+        # Extract data from canonical show
+        external_urls = show_data.get("external_urls") or {}
+        image = show_data.get("image") or {}
+        episode_stats = show_data.get("episode_stats") or {}
+        provider = show_data.get("provider", "apple_podcasts")
 
         now = datetime.now(timezone.utc).isoformat()
 
         return {
             "_index": self.INDEX_ALIAS,
-            "_id": episode_id,
+            "_id": show_id,
             "_source": {
-                "episode_id": episode_id,
+                "show_id": show_id,
 
-                # Content (from cleaned data)
-                "title": title,
-                "description": description,
+                # External IDs
+                "external_ids": {
+                    provider: show_data.get("external_id"),
+                },
+
+                # External URLs
+                "external_urls": {
+                    provider: external_urls.get(provider),
+                },
+
+                # Content
+                "title": show_data.get("title"),
+                "publisher": show_data.get("author"),
+                "description": show_data.get("description"),
 
                 # Embedding
                 "embedding": embedding_vector,
 
-                # Metadata
-                "published_at": published_at,
-                "duration_sec": duration_sec,
-                "language": language,
+                "language": show_data.get("language"),
 
-                # Audio (minimal info from original_meta)
-                "audio": {
-                    "url": audio_url,
-                },
+                # Episode stats
+                "episode_count": episode_stats.get("episode_count"),
+                "last_episode_at": episode_stats.get("last_episode_at"),
 
-                # Show
-                "show": show_obj,
+                # Ranking
+                "popularity_score": None,
+
+                # Media
+                "image_url": image.get("url"),
 
                 # Timestamps
-                "created_at": now,
+                "created_at": show_data.get("created_at") or now,
                 "updated_at": now,
             },
         }
@@ -308,15 +247,14 @@ class EmbedAndIngestPipeline:
 
     def run(self) -> Dict:
         """
-        Run the embed and ingest pipeline.
+        Run the embed and ingest pipeline for shows.
 
         Returns stats dict.
         """
         start_time = datetime.now(timezone.utc)
 
-        # Load caches
+        # Load show cache
         self._load_show_cache()
-        self._load_cleaned_episode_cache()
 
         # Count files
         files = self.list_embedding_input_files()
@@ -343,7 +281,7 @@ class EmbedAndIngestPipeline:
                 logger.info(
                     "sample_input",
                     extra={
-                        "episode_id": inp["episode_id"],
+                        "show_id": inp["show_id"],
                         "text_len": len(inp["embedding_input"]["text"]),
                     },
                 )
@@ -391,7 +329,7 @@ class EmbedAndIngestPipeline:
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="Embed and ingest episodes to ES")
+    parser = argparse.ArgumentParser(description="Embed and ingest shows to ES")
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -407,7 +345,7 @@ def run() -> None:
 
     setup_logging()
 
-    pipeline = EmbedAndIngestPipeline(
+    pipeline = EmbedAndIngestShowsPipeline(
         batch_size=args.batch_size,
         dry_run=args.dry_run,
     )

@@ -147,7 +147,41 @@ python -m src.pipelines.build_embedding_input
 python -m src.pipelines.embed_and_ingest --batch-size 64
 ```
 
-### 5. Verify Results
+**Full Reindex (one-liner)**:
+
+```bash
+python -m src.pipelines.create_indices && \
+python -m src.pipelines.ingest_shows && \
+python -m src.pipelines.clean_episodes && \
+python -m src.pipelines.build_embedding_input && \
+python -m src.pipelines.embed_and_ingest --batch-size 64
+```
+
+### 5. Run Evaluation
+
+After indexing, run evaluation to validate search quality:
+
+```bash
+# No-Annotation evaluation (Extraneous, Stability, Dominance)
+python -m src.pipelines.evaluate_search
+
+# BM25 vs kNN vs Hybrid comparison (Jaccard analysis)
+python scripts/compare_search_methods.py --output data/evaluation/method_comparison.json
+```
+
+**Full Reindex + Evaluate**:
+
+```bash
+python -m src.pipelines.create_indices && \
+python -m src.pipelines.ingest_shows && \
+python -m src.pipelines.clean_episodes && \
+python -m src.pipelines.build_embedding_input && \
+python -m src.pipelines.embed_and_ingest --batch-size 64 && \
+python -m src.pipelines.evaluate_search && \
+python scripts/compare_search_methods.py --output data/evaluation/method_comparison.json
+```
+
+### 6. Verify Results
 
 In Kibana Dev Tools:
 
@@ -207,12 +241,18 @@ pytest tests/cleaning/test_text_cleaner.py -v
   "show_id": "show:apple:123",
   "title": "The Daily",
   "publisher": "The New York Times",
+  "description": "This is what the news should sound like...",
   "language": "en",
+  "categories": ["News", "News > Daily News"],
+  "explicit": false,
+  "show_type": "episodic",
   "episode_count": 1500,
   "last_episode_at": "2026-01-18T06:00:00Z",
   "external_ids": { "apple": "123" },
-  "external_urls": { "apple": "https://..." },
-  "image_url": "https://..."
+  "external_urls": { "apple": "https://podcasts.apple.com/us/podcast/..." },
+  "image_url": "https://is1-ssl.mzstatic.com/image/...",
+  "created_at": "2026-01-14T12:00:00Z",
+  "updated_at": "2026-01-18T06:00:00Z"
 }
 ```
 
@@ -226,16 +266,21 @@ pytest tests/cleaning/test_text_cleaner.py -v
   "embedding": [0.1, 0.2, ...],
   "published_at": "2026-01-18T06:00:00Z",
   "duration_sec": 1800,
+  "language": "en",
   "show": {
     "show_id": "show:apple:123",
     "title": "The Daily",
     "publisher": "The New York Times",
-    "image_url": "https://...",
-    "external_urls": { "apple": "https://..." }
+    "image_url": "https://is1-ssl.mzstatic.com/image/...",
+    "external_urls": {
+      "apple_podcasts": "https://podcasts.apple.com/us/podcast/..."
+    }
   },
   "audio": {
     "url": "https://..."
-  }
+  },
+  "created_at": "2026-01-18T06:00:00Z",
+  "updated_at": "2026-01-18T06:00:00Z"
 }
 ```
 
@@ -332,6 +377,21 @@ Layer 1: Raw RSS XML  → From podcast-crawler (../podcast-crawler/data/raw/rss/
 Layer 2: Cleaned JSON → Boilerplate removed, normalized (data/cleaned/episodes/)
 Layer 3: Embedding    → Title-weighted, truncated for embedding (data/embedding_input/)
 ```
+
+### Data Mapping from Crawler
+
+The search service handles data mapping from crawler output:
+
+**Shows (`ingest_shows.py`)**:
+- Maps `provider` field to external ID/URL keys
+- Crawler uses `{"provider": "apple", "external_urls": {"apple_podcasts": "..."}}`
+- Search normalizes to `{"external_ids": {"apple": "..."}, "external_urls": {"apple": "..."}}`
+- Extracts `image.url` → `image_url`
+
+**Episodes (`embed_and_ingest.py`)**:
+- Embeds show metadata into episode documents
+- Includes `show.image_url` and `show.external_urls` for frontend display
+- Sources show data from `data/normalized/shows/*.json`
 
 ### Cleaning Features
 
