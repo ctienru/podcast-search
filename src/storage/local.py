@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Generator
 
 from src.storage.base import SearchDataStorage
 
@@ -18,17 +18,17 @@ class LocalSearchDataStorage(SearchDataStorage):
       normalized/
         shows/
           {show_id}.json
+        episodes/
+          {episode_id}.json
       manifests/
         {timestamp}.json
         sync-cursor.json
-
-    Note: Episodes are no longer stored in normalized format.
-    podcast-search reads raw RSS XML and cleans/parses episodes itself.
     """
 
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.shows_dir = data_dir / "normalized" / "shows"
+        self.episodes_dir = data_dir / "normalized" / "episodes"
         self.manifests_dir = data_dir / "manifests"
 
     # ---------- shows ----------
@@ -52,6 +52,33 @@ class LocalSearchDataStorage(SearchDataStorage):
         path = self.shows_dir / f"{show_id}.json"
         if not path.exists():
             raise FileNotFoundError(f"show_not_found: {path}")
+
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    # ---------- episodes ----------
+
+    def list_episode_ids(self) -> Generator[str, None, None]:
+        """
+        List all episode IDs from normalized crawler output.
+
+        Returns generator of episode IDs. Returns empty generator if directory does not exist.
+        """
+        if not self.episodes_dir.exists():
+            return
+
+        for path in self.episodes_dir.iterdir():
+            if path.is_file() and path.suffix == ".json":
+                yield path.stem
+
+    def load_episode(self, episode_id: str) -> Dict[str, Any]:
+        """
+        Load an episode by ID.
+
+        Raises FileNotFoundError if episode doesn't exist.
+        """
+        path = self.episodes_dir / f"{episode_id}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"episode_not_found: {path}")
 
         return json.loads(path.read_text(encoding="utf-8"))
 
