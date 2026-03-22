@@ -1,5 +1,5 @@
 from src.config.settings import DATA_DIR
-from src.storage.base import SearchDataStorage
-from src.storage.local import LocalSearchDataStorage
+from src.storage.base import StorageBase
+from src.storage.local import LocalStorage
 
-storage: SearchDataStorage = LocalSearchDataStorage(DATA_DIR)
+storage: LocalStorage = LocalStorage(DATA_DIR)
