@@ -17,15 +17,20 @@ Usage:
 import argparse
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Generator, Iterable, Optional
 
 from elasticsearch.helpers import streaming_bulk
 
+from src.config.settings import ENABLE_LANGUAGE_SPLIT
 from src.embedding.encoder import EmbeddingEncoder
+from src.search.routing import IndexRoutingStrategy, LanguageSplitRoutingStrategy
 from src.services.es_service import ElasticsearchService
-from src.storage import storage
+from src.storage.base import StorageBase
+from src.storage.factory import create_storage
+from src.types import IndexAlias, IngestStats
 from src.utils.logging import setup_logging
 from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
 
@@ -60,10 +65,21 @@ class EmbedAndIngestPipeline:
         encoder: Optional[EmbeddingEncoder] = None,
         batch_size: int = 32,
         dry_run: bool = False,
+        storage: Optional[StorageBase] = None,
+        routing_strategy: Optional[IndexRoutingStrategy] = None,
+        enable_language_split: Optional[bool] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.batch_size = batch_size
         self.dry_run = dry_run
+        self.storage = storage or create_storage()
+        self.enable_language_split = (
+            enable_language_split if enable_language_split is not None
+            else ENABLE_LANGUAGE_SPLIT
+        )
+        self.routing_strategy: IndexRoutingStrategy = (
+            routing_strategy or LanguageSplitRoutingStrategy()
+        )
 
         # Lazy load encoder (it's heavy)
         self._encoder = encoder
@@ -71,6 +87,10 @@ class EmbedAndIngestPipeline:
         # Caches
         self._show_cache: Dict[str, Dict] = {}
         self._cleaned_episode_cache: Dict[str, Dict] = {}
+
+        # Ingest tracking (populated during build_actions)
+        self._index_counts: Dict[str, int] = defaultdict(int)
+        self._language_distribution: Dict[str, int] = defaultdict(int)
 
     @property
     def encoder(self) -> EmbeddingEncoder:
@@ -89,11 +109,26 @@ class EmbedAndIngestPipeline:
         return self._encoder
 
     def _load_show_cache(self) -> None:
-        """Pre-load all show data from storage."""
+        """Pre-load all show data from storage.
+
+        v2: reads Show dataclasses from SQLiteStorage.get_shows().
+        v1: reads rich dicts from LocalStorage.list_show_ids() + load_show().
+        """
+        if self.enable_language_split:
+            for show in self.storage.get_shows():
+                self._show_cache[show.show_id] = {
+                    "show_id": show.show_id,
+                    "title": show.title,
+                    "author": show.author,
+                }
+            logger.info("show_cache_loaded", extra={"count": len(self._show_cache)})
+            return
+
+        # v1 legacy path
         loaded = 0
-        for show_id in storage.list_show_ids():
+        for show_id in self.storage.list_show_ids():  # type: ignore[attr-defined]
             try:
-                show_data = storage.load_show(show_id)
+                show_data = self.storage.load_show(show_id)  # type: ignore[attr-defined]
                 if show_data:
                     self._show_cache[show_id] = show_data
                     loaded += 1
@@ -103,10 +138,7 @@ class EmbedAndIngestPipeline:
                     extra={"show_id": show_id, "error": str(e)},
                 )
 
-        logger.info(
-            "show_cache_loaded",
-            extra={"count": loaded},
-        )
+        logger.info("show_cache_loaded", extra={"count": loaded})
 
     def _load_cleaned_episode_cache(self) -> None:
         """Pre-load all cleaned episode data into memory."""
@@ -242,10 +274,28 @@ class EmbedAndIngestPipeline:
                     external_urls = show_data.get("external_urls") or {}
                     show_obj["external_urls"] = external_urls
 
+        # v2: route to language-specific alias; v1: fall back to INDEX_ALIAS
+        if self.enable_language_split:
+            raw_target = cleaned_ep.get("target_index", "")
+            try:
+                index_alias: str = self.routing_strategy.get_alias(raw_target)
+            except ValueError:
+                logger.warning(
+                    "episode_routing_failed",
+                    extra={"episode_id": episode_id, "target_index": raw_target},
+                )
+                return None
+        else:
+            index_alias = self.INDEX_ALIAS
+
+        # Track per-alias and per-language counts
+        self._index_counts[index_alias] += 1
+        self._language_distribution[language or "unknown"] += 1
+
         now = datetime.now(timezone.utc).isoformat()
 
         return {
-            "_index": self.INDEX_ALIAS,
+            "_index": index_alias,
             "_id": episode_id,
             "_source": {
                 "episode_id": episode_id,
@@ -387,7 +437,53 @@ class EmbedAndIngestPipeline:
                 extra={"sample": errors[:5]},
             )
 
+        if self.enable_language_split:
+            emit_ingest_log(
+                index_counts=dict(self._index_counts),
+                language_distribution=dict(self._language_distribution),
+                ingest_success=success,
+                ingest_failed=len(errors),
+            )
+
         return stats
+
+
+def emit_ingest_log(
+    index_counts: Dict[str, int],
+    language_distribution: Dict[str, int],
+    ingest_success: int,
+    ingest_failed: int,
+) -> None:
+    """Emit a structured ingest completion log entry.
+
+    Logs a WARNING if uncertain_rate exceeds 5%, which may indicate
+    a language detection regression in the crawler.
+
+    Args:
+        index_counts:          Document count per ES alias.
+        language_distribution: Count per detected language (incl. "uncertain").
+        ingest_success:        Number of documents successfully indexed.
+        ingest_failed:         Number of documents that failed to index.
+    """
+    total = ingest_success + ingest_failed
+    uncertain_rate = (
+        language_distribution.get("uncertain", 0) / total if total > 0 else 0.0
+    )
+    stats: IngestStats = {
+        "event":                 "ingest_complete",
+        "timestamp":             datetime.now(timezone.utc).isoformat(),
+        "index_counts":          index_counts,
+        "language_distribution": language_distribution,
+        "ingest_success":        ingest_success,
+        "ingest_failed":         ingest_failed,
+        "uncertain_rate":        uncertain_rate,
+    }
+    logger.info(json.dumps(stats))
+    if uncertain_rate > 0.05:
+        logger.warning(
+            "uncertain_rate_high",
+            extra={"uncertain_rate": round(uncertain_rate, 4)},
+        )
 
 
 def run() -> None:
