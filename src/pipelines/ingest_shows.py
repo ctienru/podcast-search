@@ -3,8 +3,11 @@ from typing import Dict, Iterable, Optional
 
 from elasticsearch import helpers
 
+from src.config.settings import ENABLE_LANGUAGE_SPLIT
 from src.services.es_service import ElasticsearchService
-from src.storage import storage
+from src.storage.base import StorageBase
+from src.storage.factory import create_storage
+from src.types import Show
 from src.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -26,17 +29,47 @@ class IngestShowsPipeline:
     def __init__(
         self,
         es_service: Optional[ElasticsearchService] = None,
+        storage: Optional[StorageBase] = None,
+        enable_language_split: Optional[bool] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
+        self.storage = storage or create_storage()
+        self.enable_language_split = (
+            enable_language_split if enable_language_split is not None
+            else ENABLE_LANGUAGE_SPLIT
+        )
 
     # ---------- load ----------
 
+    @staticmethod
+    def _show_to_dict(show: Show) -> Dict:
+        """Convert v2 Show dataclass to a dict compatible with to_es_doc.
+
+        Fields not available in SQLite (external_urls, image, etc.) default
+        to None and will be omitted from the ES document.
+        """
+        return {
+            "show_id": show.show_id,
+            "title": show.title,
+            "author": show.author,
+            "language": show.language_detected,
+            "updated_at": show.updated_at,
+        }
+
     def load_shows(self) -> Iterable[Dict]:
+        """Load all canonical shows from storage.
+
+        v2 (ENABLE_LANGUAGE_SPLIT=true): reads from SQLiteStorage via get_shows().
+        v1 (ENABLE_LANGUAGE_SPLIT=false): reads from LocalStorage JSON files.
         """
-        Load all canonical shows from storage.
-        """
-        for show_id in storage.list_show_ids():
-            data = storage.load_show(show_id)
+        if self.enable_language_split:
+            for show in self.storage.get_shows():
+                yield self._show_to_dict(show)
+            return
+
+        # v1 legacy path: LocalStorage list + load
+        for show_id in self.storage.list_show_ids():  # type: ignore[attr-defined]
+            data = self.storage.load_show(show_id)  # type: ignore[attr-defined]
             if not data:
                 logger.warning(
                     "show_not_found_in_storage",
