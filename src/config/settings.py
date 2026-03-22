@@ -32,3 +32,19 @@ ES_API_KEY = os.getenv("ES_API_KEY")
 # Sync settings
 SYNC_MODE = os.getenv("SYNC_MODE", "incremental")  # full, incremental, backfill, single
 BACKFILL_FROM = os.getenv("BACKFILL_FROM")  # Timestamp for backfill mode
+
+# v2: Language split feature flag
+ENABLE_LANGUAGE_SPLIT: bool = os.getenv("ENABLE_LANGUAGE_SPLIT", "false").lower() == "true"
+
+# v2: SQLite data source (produced by podcast-crawler v2)
+SQLITE_PATH: Path = Path(os.getenv("SQLITE_PATH", str(DATA_DIR / "crawler.db")))
+
+# v2: ES index alias names (backend always uses aliases, never raw index names)
+INDEX_ZH_TW: str = os.getenv("INDEX_ZH_TW", "episodes-zh-tw")
+INDEX_ZH_CN: str = os.getenv("INDEX_ZH_CN", "episodes-zh-cn")
+INDEX_EN: str = os.getenv("INDEX_EN", "episodes-en")
+
+# v2: Behavioral log paths
+QUERY_LOG_PATH: Path = Path(os.getenv("QUERY_LOG_PATH", "logs/query_log.jsonl"))
+CLICK_LOG_PATH: Path = Path(os.getenv("CLICK_LOG_PATH", "logs/click_log.jsonl"))
+INGEST_CURSOR_PATH: Path = Path(os.getenv("INGEST_CURSOR_PATH", "data/ingest_cursor.json"))
