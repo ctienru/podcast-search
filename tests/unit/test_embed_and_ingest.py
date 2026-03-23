@@ -67,14 +67,12 @@ def test_emit_ingest_log_handles_zero_total(caplog) -> None:
 
 # ── to_es_doc routing ────────────────────────────────────────────────────────
 
-def _make_pipeline(enable_language_split: bool) -> EmbedAndIngestPipeline:
-    pipeline = EmbedAndIngestPipeline(
+def _make_pipeline() -> EmbedAndIngestPipeline:
+    return EmbedAndIngestPipeline(
         es_service=MagicMock(),
         encoder=MagicMock(),
-        enable_language_split=enable_language_split,
         routing_strategy=LanguageSplitRoutingStrategy(),
     )
-    return pipeline
 
 
 def _seed_caches(pipeline: EmbedAndIngestPipeline, episode_id: str, target_index: str) -> None:
@@ -98,9 +96,9 @@ def _seed_caches(pipeline: EmbedAndIngestPipeline, episode_id: str, target_index
     }
 
 
-def test_to_es_doc_v2_routes_to_language_alias() -> None:
-    """When enable_language_split=True, _index should be the routing strategy's alias."""
-    pipeline = _make_pipeline(enable_language_split=True)
+def test_to_es_doc_routes_to_language_alias() -> None:
+    """_index should be the alias returned by the routing strategy."""
+    pipeline = _make_pipeline()
     _seed_caches(pipeline, "ep-1", "podcast-episodes-zh-tw")
 
     doc = pipeline.to_es_doc({"episode_id": "ep-1", "show_id": "show-1"}, [0.1] * 384)
@@ -109,22 +107,11 @@ def test_to_es_doc_v2_routes_to_language_alias() -> None:
     assert doc["_index"] == "episodes-zh-tw"
 
 
-def test_to_es_doc_v2_returns_none_for_unknown_target_index() -> None:
+def test_to_es_doc_returns_none_for_unknown_target_index() -> None:
     """When target_index cannot be routed, to_es_doc returns None and does not raise."""
-    pipeline = _make_pipeline(enable_language_split=True)
+    pipeline = _make_pipeline()
     _seed_caches(pipeline, "ep-2", "podcast-episodes-jp")  # unmapped
 
     doc = pipeline.to_es_doc({"episode_id": "ep-2", "show_id": "show-1"}, [0.1] * 384)
 
     assert doc is None
-
-
-def test_to_es_doc_v1_uses_default_alias() -> None:
-    """When enable_language_split=False, _index should be the legacy INDEX_ALIAS."""
-    pipeline = _make_pipeline(enable_language_split=False)
-    _seed_caches(pipeline, "ep-3", "podcast-episodes-zh-tw")
-
-    doc = pipeline.to_es_doc({"episode_id": "ep-3", "show_id": "show-1"}, [0.1] * 384)
-
-    assert doc is not None
-    assert doc["_index"] == EmbedAndIngestPipeline.INDEX_ALIAS

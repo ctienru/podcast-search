@@ -24,7 +24,6 @@ from typing import Dict, Generator, Iterable, Optional
 
 from elasticsearch.helpers import streaming_bulk
 
-from src.config.settings import ENABLE_LANGUAGE_SPLIT
 from src.embedding.encoder import EmbeddingEncoder
 from src.search.routing import IndexRoutingStrategy, LanguageSplitRoutingStrategy
 from src.services.es_service import ElasticsearchService
@@ -44,17 +43,17 @@ class EmbedAndIngestPipeline:
     Pipeline to embed episode texts and ingest into Elasticsearch.
 
     Data flow:
-        embedding_input/*.json + cleaned/*.json → EmbeddingEncoder → ES episodes index
+        embedding_input/*.json + cleaned/*.json → EmbeddingEncoder → language-specific ES alias
 
     The pipeline:
     1. Reads pre-built embedding_input files (title-weighted + truncated text)
     2. Loads corresponding cleaned episode data for metadata
     3. Generates embeddings using sentence-transformers
     4. Merges embedding into ES document
-    5. Bulk indexes into ES
+    5. Routes each episode to the correct language alias via IndexRoutingStrategy
+    6. Bulk indexes into ES
     """
 
-    INDEX_ALIAS = "episodes"
     EMBEDDING_INPUT_DIR = Path("data/embedding_input/episodes")
     CLEANED_EPISODES_DIR = Path("data/cleaned/episodes")
     CLEANED_SHOWS_DIR = Path("data/cleaned/shows")
@@ -67,16 +66,11 @@ class EmbedAndIngestPipeline:
         dry_run: bool = False,
         storage: Optional[StorageBase] = None,
         routing_strategy: Optional[IndexRoutingStrategy] = None,
-        enable_language_split: Optional[bool] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.batch_size = batch_size
         self.dry_run = dry_run
         self.storage = storage or create_storage()
-        self.enable_language_split = (
-            enable_language_split if enable_language_split is not None
-            else ENABLE_LANGUAGE_SPLIT
-        )
         self.routing_strategy: IndexRoutingStrategy = (
             routing_strategy or LanguageSplitRoutingStrategy()
         )
@@ -109,36 +103,14 @@ class EmbedAndIngestPipeline:
         return self._encoder
 
     def _load_show_cache(self) -> None:
-        """Pre-load all show data from storage.
-
-        v2: reads Show dataclasses from SQLiteStorage.get_shows().
-        v1: reads rich dicts from LocalStorage.list_show_ids() + load_show().
-        """
-        if self.enable_language_split:
-            for show in self.storage.get_shows():
-                self._show_cache[show.show_id] = {
-                    "show_id": show.show_id,
-                    "title": show.title,
-                    "author": show.author,
-                }
-            logger.info("show_cache_loaded", extra={"count": len(self._show_cache)})
-            return
-
-        # v1 legacy path
-        loaded = 0
-        for show_id in self.storage.list_show_ids():  # type: ignore[attr-defined]
-            try:
-                show_data = self.storage.load_show(show_id)  # type: ignore[attr-defined]
-                if show_data:
-                    self._show_cache[show_id] = show_data
-                    loaded += 1
-            except Exception as e:
-                logger.warning(
-                    "show_cache_load_failed",
-                    extra={"show_id": show_id, "error": str(e)},
-                )
-
-        logger.info("show_cache_loaded", extra={"count": loaded})
+        """Pre-load all show data from SQLiteStorage into memory."""
+        for show in self.storage.get_shows():
+            self._show_cache[show.show_id] = {
+                "show_id": show.show_id,
+                "title": show.title,
+                "author": show.author,
+            }
+        logger.info("show_cache_loaded", extra={"count": len(self._show_cache)})
 
     def _load_cleaned_episode_cache(self) -> None:
         """Pre-load all cleaned episode data into memory."""
@@ -274,19 +246,15 @@ class EmbedAndIngestPipeline:
                     external_urls = show_data.get("external_urls") or {}
                     show_obj["external_urls"] = external_urls
 
-        # v2: route to language-specific alias; v1: fall back to INDEX_ALIAS
-        if self.enable_language_split:
-            raw_target = cleaned_ep.get("target_index", "")
-            try:
-                index_alias: str = self.routing_strategy.get_alias(raw_target)
-            except ValueError:
-                logger.warning(
-                    "episode_routing_failed",
-                    extra={"episode_id": episode_id, "target_index": raw_target},
-                )
-                return None
-        else:
-            index_alias = self.INDEX_ALIAS
+        raw_target = cleaned_ep.get("target_index", "")
+        try:
+            index_alias: str = self.routing_strategy.get_alias(raw_target)
+        except ValueError:
+            logger.warning(
+                "episode_routing_failed",
+                extra={"episode_id": episode_id, "target_index": raw_target},
+            )
+            return None
 
         # Track per-alias and per-language counts
         self._index_counts[index_alias] += 1
@@ -437,13 +405,12 @@ class EmbedAndIngestPipeline:
                 extra={"sample": errors[:5]},
             )
 
-        if self.enable_language_split:
-            emit_ingest_log(
-                index_counts=dict(self._index_counts),
-                language_distribution=dict(self._language_distribution),
-                ingest_success=success,
-                ingest_failed=len(errors),
-            )
+        emit_ingest_log(
+            index_counts=dict(self._index_counts),
+            language_distribution=dict(self._language_distribution),
+            ingest_success=success,
+            ingest_failed=len(errors),
+        )
 
         return stats
 
