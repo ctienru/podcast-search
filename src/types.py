@@ -18,17 +18,35 @@ IndexAlias = Literal["episodes-zh-tw", "episodes-zh-cn", "episodes-en"]
 
 @dataclass(frozen=True)
 class Show:
-    """A podcast show as stored in the crawler's SQLite database."""
+    """A podcast show as stored in the crawler's SQLite database.
 
-    show_id: str
-    title: str
-    author: str
-    language_detected: Language
+    Required fields are the routing-critical columns guaranteed to be non-null
+    (enforced by SQLiteStorage._WHERE_BASE).
+
+    Optional fields are populated from SQLite columns that may be NULL in older
+    rows or not yet crawled. Callers must handle None / empty defaults.
+    """
+
+    # ── Required (routing-critical, always non-null) ─────────────────────────
+    show_id:             str
+    title:               str
+    author:              str
+    language_detected:   Language
     language_confidence: float
-    language_uncertain: bool
-    target_index: str        # raw value from SQLite, e.g. "podcast-episodes-zh-tw"
-    rss_feed_url: str
-    updated_at: str
+    language_uncertain:  bool
+    target_index:        str      # raw value from SQLite, e.g. "podcast-episodes-zh-tw"
+    rss_feed_url:        str
+    updated_at:          str
+
+    # ── Optional (media / display metadata) ──────────────────────────────────
+    provider:        str                   = ""    # e.g. "apple"
+    external_id:     str                   = ""    # provider-specific ID, e.g. "77001367"
+    description:     Optional[str]         = None
+    image_url:       Optional[str]         = None  # parsed from SQLite image JSON column
+    external_urls:   dict[str, str]        = field(default_factory=dict)   # e.g. {"apple_podcasts": "https://..."}
+    episode_count:   Optional[int]         = None
+    last_episode_at: Optional[str]         = None
+    categories:      tuple[str, ...]       = field(default_factory=tuple)  # tuple for hashability (frozen dataclass)
 
 
 @dataclass(frozen=True)
