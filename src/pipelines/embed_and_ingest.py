@@ -38,6 +38,9 @@ from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
 # All language-specific index aliases used by the v2 routing.
 _ALIASES: tuple[str, ...] = ("episodes-zh-tw", "episodes-zh-cn", "episodes-en")
 
+# Legacy v1 alias used when ENABLE_LANGUAGE_SPLIT=False.
+_LEGACY_ALIAS = "episodes"
+
 # Map raw SQLite target_index values to Language literals.
 _TARGET_INDEX_TO_LANGUAGE: dict[str, Language] = {
     "podcast-episodes-zh-tw": "zh-tw",
@@ -313,15 +316,19 @@ class EmbedAndIngestPipeline:
                     show_obj["image_url"] = show_data.get("image_url")
                     show_obj["external_urls"] = show_data.get("external_urls") or {}
 
-        raw_target = cleaned_ep.get("target_index", "")
-        try:
-            index_alias: str = self.routing_strategy.get_alias(raw_target)
-        except ValueError:
-            logger.warning(
-                "episode_routing_failed",
-                extra={"episode_id": episode_id, "target_index": raw_target},
-            )
-            return None
+        if settings.ENABLE_LANGUAGE_SPLIT:
+            raw_target = cleaned_ep.get("target_index", "")
+            try:
+                index_alias: str = self.routing_strategy.get_alias(raw_target)
+            except ValueError:
+                logger.warning(
+                    "episode_routing_failed",
+                    extra={"episode_id": episode_id, "target_index": raw_target},
+                )
+                return None
+        else:
+            # v1 mode: route all episodes to the legacy monolithic alias.
+            index_alias = _LEGACY_ALIAS
 
         # Track per-alias and per-language counts
         self._index_counts[index_alias] += 1
@@ -354,14 +361,21 @@ class EmbedAndIngestPipeline:
             "updated_at": now,
         }
 
-        # Only include embedding when a vector was computed (BM25-only mode omits it)
         if embedding_vector:
             source["embedding"] = embedding_vector
+            return {
+                "_index": index_alias,
+                "_id": episode_id,
+                "_source": source,
+            }
 
+        # BM25-only mode: use partial update to preserve any existing embedding vector.
         return {
+            "_op_type": "update",
             "_index": index_alias,
             "_id": episode_id,
-            "_source": source,
+            "doc": source,
+            "doc_as_upsert": True,
         }
 
     def build_actions(
