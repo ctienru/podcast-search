@@ -242,7 +242,7 @@ The service exposes two endpoints used by `podcast-backend`:
 # Embed a query
 curl -X POST http://localhost:8000/embed \
   -H "Content-Type: application/json" \
-  -d '{"query": "人工智慧", "language": "zh-tw"}'
+  -d '{"texts": ["人工智慧"], "language": "zh-tw"}'
 ```
 
 ## Environment Variables

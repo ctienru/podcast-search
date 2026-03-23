@@ -224,9 +224,7 @@ class TestShowFieldsFlowToEsDoc:
 
     def _run(self, show: Show) -> dict:
         pipeline = IngestShowsPipeline(es_service=MagicMock())
-        shows = list(pipeline.load_shows.__func__(pipeline) if False else
-                     [pipeline._show_to_dict(show)])
-        return pipeline.to_es_doc(shows[0])["_source"]
+        return pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
 
     def test_image_url_in_es_doc(self):
         """image_url from Show should appear in the ES document."""
