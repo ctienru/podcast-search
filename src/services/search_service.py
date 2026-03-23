@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from src.embedding.encoder import EmbeddingEncoder
+from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
 from src.es.client import get_es_client
 
 logger = logging.getLogger(__name__)
@@ -85,17 +85,17 @@ class SearchService:
 
     def __init__(
         self,
-        encoder: Optional[EmbeddingEncoder] = None,
+        encoder: Optional[EmbeddingBackend] = None,
     ):
         self.client = get_es_client()
         self._encoder = encoder
 
     @property
-    def encoder(self) -> EmbeddingEncoder:
-        """Lazy load encoder."""
+    def encoder(self) -> EmbeddingBackend:
+        """Lazy load embedding backend."""
         if self._encoder is None:
             logger.info("loading_encoder_for_search")
-            self._encoder = EmbeddingEncoder()
+            self._encoder = LocalEmbeddingBackend()
         return self._encoder
 
     def _build_bm25_query(
@@ -344,8 +344,8 @@ class SearchService:
         Returns:
             SearchResponse with results
         """
-        # Encode query to vector
-        query_vector = self.encoder.encode(query).tolist()
+        # Encode query to vector (default zh-tw for evaluation; override via language param)
+        query_vector = self.encoder.embed(query, language="zh-tw")
 
         body = {
             "knn": self._build_knn_clause(query_vector, k=size),
