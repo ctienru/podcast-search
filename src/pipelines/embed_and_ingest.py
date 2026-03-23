@@ -1,12 +1,11 @@
-"""
-Embed and Ingest Episodes Pipeline
+"""Embed and Ingest Episodes Pipeline
 
 Read embedding_input files, generate embeddings, and write to Elasticsearch.
 
 Data sources:
 - embedding_input: data/embedding_input/episodes/*.json (text for embedding)
 - cleaned: data/cleaned/episodes/*.json (episode metadata)
-- shows: data/cleaned/shows/*.json (show metadata)
+- shows: SQLiteStorage (show metadata)
 
 Usage:
     python -m src.pipelines.embed_and_ingest
@@ -27,21 +26,40 @@ from typing import Dict, Generator, Iterable, Optional
 from elasticsearch.helpers import streaming_bulk
 
 from src.config import settings
-from src.embedding.encoder import EmbeddingEncoder
+from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
 from src.search.routing import IndexRoutingStrategy, LanguageSplitRoutingStrategy
 from src.services.es_service import ElasticsearchService
 from src.storage.base import StorageBase
 from src.storage.factory import create_storage
-from src.types import IndexAlias, IngestCursor, IngestStats
+from src.types import IndexAlias, IngestCursor, IngestStats, Language
 from src.utils.logging import setup_logging
 from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
 
 # All language-specific index aliases used by the v2 routing.
 _ALIASES: tuple[str, ...] = ("episodes-zh-tw", "episodes-zh-cn", "episodes-en")
 
+# Map raw SQLite target_index values to Language literals.
+_TARGET_INDEX_TO_LANGUAGE: dict[str, Language] = {
+    "podcast-episodes-zh-tw": "zh-tw",
+    "podcast-episodes-zh-cn": "zh-cn",
+    "podcast-episodes-en":    "en",
+}
+
 logger = logging.getLogger(__name__)
 logging.getLogger("elastic_transport").setLevel(logging.WARNING)
 logging.getLogger("elasticsearch").setLevel(logging.WARNING)
+
+
+def _language_from_target_index(target_index: str) -> Optional[Language]:
+    """Map a raw target_index value from SQLite to a Language literal.
+
+    Args:
+        target_index: Raw value stored in SQLite, e.g. "podcast-episodes-zh-tw".
+
+    Returns:
+        Language ("zh-tw", "zh-cn", or "en"), or None if unrecognised.
+    """
+    return _TARGET_INDEX_TO_LANGUAGE.get(target_index)
 
 
 class EmbedAndIngestPipeline:
@@ -49,15 +67,19 @@ class EmbedAndIngestPipeline:
     Pipeline to embed episode texts and ingest into Elasticsearch.
 
     Data flow:
-        embedding_input/*.json + cleaned/*.json → EmbeddingEncoder → language-specific ES alias
+        embedding_input/*.json + cleaned/*.json → EmbeddingBackend → language-specific ES alias
 
     The pipeline:
     1. Reads pre-built embedding_input files (title-weighted + truncated text)
     2. Loads corresponding cleaned episode data for metadata
-    3. Generates embeddings using sentence-transformers
+    3. Groups episodes by language and generates embeddings via EmbeddingBackend
     4. Merges embedding into ES document
     5. Routes each episode to the correct language alias via IndexRoutingStrategy
     6. Bulk indexes into ES
+
+    When embedding_backend is None, the pipeline runs in BM25-only mode:
+    episodes are ingested without an embedding field (suitable for field-only
+    backfills where existing vectors should be preserved by ES update).
     """
 
     EMBEDDING_INPUT_DIR = Path("data/embedding_input/episodes")
@@ -67,7 +89,7 @@ class EmbedAndIngestPipeline:
     def __init__(
         self,
         es_service: Optional[ElasticsearchService] = None,
-        encoder: Optional[EmbeddingEncoder] = None,
+        embedding_backend: Optional[EmbeddingBackend] = None,
         batch_size: int = 32,
         dry_run: bool = False,
         storage: Optional[StorageBase] = None,
@@ -82,9 +104,7 @@ class EmbedAndIngestPipeline:
             routing_strategy or LanguageSplitRoutingStrategy()
         )
         self.allowed_show_ids = allowed_show_ids  # None = process all shows
-
-        # Lazy load encoder (it's heavy)
-        self._encoder = encoder
+        self._embedding_backend = embedding_backend  # None = BM25-only mode
 
         # Caches
         self._show_cache: Dict[str, Dict] = {}
@@ -93,22 +113,6 @@ class EmbedAndIngestPipeline:
         # Ingest tracking (populated during build_actions)
         self._index_counts: Dict[str, int] = defaultdict(int)
         self._language_distribution: Dict[str, int] = defaultdict(int)
-
-    @property
-    def encoder(self) -> EmbeddingEncoder:
-        """Lazy load the embedding encoder."""
-        if self._encoder is None:
-            logger.info("loading_encoder")
-            self._encoder = EmbeddingEncoder()
-            logger.info(
-                "encoder_loaded",
-                extra={
-                    "model": self._encoder.model_name,
-                    "dim": self._encoder.embedding_dim,
-                    "device": str(self._encoder.model.device),
-                },
-            )
-        return self._encoder
 
     def _load_show_cache(self) -> None:
         """Pre-load show data from SQLiteStorage into memory.
@@ -165,6 +169,25 @@ class EmbedAndIngestPipeline:
         """Get cleaned episode data from cache."""
         return self._cleaned_episode_cache.get(episode_id)
 
+    def _get_language_for_input(self, inp: Dict) -> Optional[Language]:
+        """Derive the Language for an embedding input from its cleaned episode cache entry.
+
+        Looks up target_index in the cleaned episode cache and maps it to a Language.
+
+        Args:
+            inp: An embedding input dict with an 'episode_id' key.
+
+        Returns:
+            Language literal, or None if episode is unknown or target_index is unmapped.
+        """
+        episode_id = inp.get("episode_id")
+        if not episode_id:
+            return None
+        cleaned = self._cleaned_episode_cache.get(episode_id)
+        if not cleaned:
+            return None
+        return _language_from_target_index(cleaned.get("target_index", ""))
+
     def list_embedding_input_files(self) -> list[Path]:
         """List all embedding input JSON files."""
         if not self.EMBEDDING_INPUT_DIR.exists():
@@ -193,18 +216,46 @@ class EmbedAndIngestPipeline:
     def batch_encode(
         self, inputs: list[Dict]
     ) -> list[tuple[Dict, list[float]]]:
-        """
-        Batch encode embedding inputs.
+        """Encode a batch of embedding inputs, grouping by language for efficiency.
 
-        Returns list of (input_dict, embedding_vector) tuples.
-        """
-        texts = [inp["embedding_input"]["text"] for inp in inputs]
-        embeddings = self.encoder.encode_batch(texts, batch_size=self.batch_size)
+        Groups inputs by their language (derived from target_index in the cleaned
+        episode cache) and calls embedding_backend.embed_batch() once per language
+        group. This allows LocalEmbeddingBackend to use a single model.encode(texts)
+        call per language rather than N individual encode calls.
 
-        results = []
-        for inp, emb in zip(inputs, embeddings):
-            results.append((inp, self.encoder.to_list(emb)))
-        return results
+        Args:
+            inputs: List of embedding input dicts, each with 'episode_id' and
+                    'embedding_input.text' keys.
+
+        Returns:
+            List of (input_dict, embedding_vector) tuples in the same order as
+            the inputs. Vectors are [] for items with unknown language or when
+            embedding_backend is None (BM25-only mode).
+        """
+        if self._embedding_backend is None:
+            return [(inp, []) for inp in inputs]
+
+        # Determine language and group input indices by language
+        lang_groups: dict[Language, list[int]] = defaultdict(list)
+        unknown_indices: list[int] = []
+
+        for i, inp in enumerate(inputs):
+            lang = self._get_language_for_input(inp)
+            if lang is None:
+                unknown_indices.append(i)
+            else:
+                lang_groups[lang].append(i)
+
+        # Result buffer — pre-filled with empty vectors, filled in per group
+        result: list[tuple[Dict, list[float]]] = [(inp, []) for inp in inputs]
+
+        for lang, indices in lang_groups.items():
+            texts = [inputs[i]["embedding_input"]["text"] for i in indices]
+            vectors = self._embedding_backend.embed_batch(texts, lang)
+            for i, vec in zip(indices, vectors):
+                result[i] = (inputs[i], vec)
+
+        return result
 
     def to_es_doc(
         self,
@@ -215,6 +266,8 @@ class EmbedAndIngestPipeline:
         Build ES document from embedding_input, cleaned episode data, and embedding vector.
 
         Uses cleaned episode data for metadata instead of canonical storage.
+        When embedding_vector is empty, the 'embedding' field is omitted from _source
+        (BM25-only mode — preserves any existing vector in ES via upsert).
         """
         episode_id = embedding_input["episode_id"]
         show_id = embedding_input.get("show_id")
@@ -280,36 +333,39 @@ class EmbedAndIngestPipeline:
 
         now = datetime.now(timezone.utc).isoformat()
 
+        source: Dict = {
+            "episode_id": episode_id,
+
+            # Content (from cleaned data)
+            "title": title,
+            "description": description,
+
+            # Metadata
+            "published_at": published_at,
+            "duration_sec": duration_sec,
+            "language": language,
+
+            # Audio (minimal info from original_meta)
+            "audio": {
+                "url": audio_url,
+            },
+
+            # Show
+            "show": show_obj,
+
+            # Timestamps
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        # Only include embedding when a vector was computed (BM25-only mode omits it)
+        if embedding_vector:
+            source["embedding"] = embedding_vector
+
         return {
             "_index": index_alias,
             "_id": episode_id,
-            "_source": {
-                "episode_id": episode_id,
-
-                # Content (from cleaned data)
-                "title": title,
-                "description": description,
-
-                # Embedding
-                "embedding": embedding_vector,
-
-                # Metadata
-                "published_at": published_at,
-                "duration_sec": duration_sec,
-                "language": language,
-
-                # Audio (minimal info from original_meta)
-                "audio": {
-                    "url": audio_url,
-                },
-
-                # Show
-                "show": show_obj,
-
-                # Timestamps
-                "created_at": now,
-                "updated_at": now,
-            },
+            "_source": source,
         }
 
     def build_actions(
@@ -326,7 +382,6 @@ class EmbedAndIngestPipeline:
             batch.append(inp)
 
             if len(batch) >= self.batch_size:
-                # Encode batch
                 encoded = self.batch_encode(batch)
                 for inp_data, emb in encoded:
                     doc = self.to_es_doc(inp_data, emb)
@@ -364,6 +419,7 @@ class EmbedAndIngestPipeline:
                 "total_files": total_count,
                 "batch_size": self.batch_size,
                 "dry_run": self.dry_run,
+                "embedding": self._embedding_backend is not None,
             },
         )
 
@@ -372,7 +428,6 @@ class EmbedAndIngestPipeline:
             return {"success": 0, "errors": 0, "total": 0}
 
         if self.dry_run:
-            # Just count and sample
             logger.info("dry_run_mode")
             sample_inputs = list(self.load_embedding_inputs())[:3]
             for inp in sample_inputs:
@@ -470,6 +525,7 @@ def save_cursor(
 def run_incremental(
     storage: Optional[StorageBase] = None,
     routing: Optional[IndexRoutingStrategy] = None,
+    embedding_backend: Optional[EmbeddingBackend] = None,
     force_full: bool = False,
     cursor_path: Optional[Path] = None,
     batch_size: int = 32,
@@ -482,19 +538,22 @@ def run_incremental(
     a successful run.
 
     Args:
-        storage:     Storage backend. Defaults to create_storage().
-        routing:     Index routing strategy. Defaults to LanguageSplitRoutingStrategy.
-        force_full:  Ignore the cursor and process all shows (e.g. after a
-                     mapping change). Equivalent to run_backfill().
-        cursor_path: Path to the cursor file. Defaults to settings.INGEST_CURSOR_PATH.
-        batch_size:  Embedding batch size passed to EmbedAndIngestPipeline.
-        dry_run:     Dry-run flag passed to EmbedAndIngestPipeline.
+        storage:           Storage backend. Defaults to create_storage().
+        routing:           Index routing strategy. Defaults to LanguageSplitRoutingStrategy.
+        embedding_backend: Embedding backend. Defaults to LocalEmbeddingBackend().
+                           Pass None explicitly for BM25-only mode.
+        force_full:        Ignore the cursor and process all shows (e.g. after a
+                           mapping change). Equivalent to run_backfill().
+        cursor_path:       Path to the cursor file. Defaults to settings.INGEST_CURSOR_PATH.
+        batch_size:        Embedding batch size passed to EmbedAndIngestPipeline.
+        dry_run:           Dry-run flag passed to EmbedAndIngestPipeline.
 
     Returns:
         Stats dict from EmbedAndIngestPipeline.run(), or
         {"success": 0, "errors": 0, "total": 0} when no shows are updated.
     """
     _storage = storage or create_storage()
+    _backend = embedding_backend if embedding_backend is not None else LocalEmbeddingBackend()
     cursors = {} if force_full else load_cursor(cursor_path)
     now = datetime.now(timezone.utc).isoformat()
 
@@ -517,6 +576,7 @@ def run_incremental(
     pipeline = EmbedAndIngestPipeline(
         storage=_storage,
         routing_strategy=routing or LanguageSplitRoutingStrategy(),
+        embedding_backend=_backend,
         allowed_show_ids=allowed_show_ids,
         batch_size=batch_size,
         dry_run=dry_run,
@@ -533,6 +593,7 @@ def run_incremental(
 def run_backfill(
     storage: Optional[StorageBase] = None,
     routing: Optional[IndexRoutingStrategy] = None,
+    embedding_backend: Optional[EmbeddingBackend] = None,
     cursor_path: Optional[Path] = None,
     batch_size: int = 32,
     dry_run: bool = False,
@@ -540,14 +601,18 @@ def run_backfill(
     """Re-ingest all shows regardless of cursor (force_full=True).
 
     Use this after adding a non-analyzer field to the mapping: it re-ingests
-    every document without re-computing embeddings.
+    every document without re-computing embeddings (embedding_backend defaults
+    to None so existing ES vectors are preserved via update semantics).
+
+    To also re-embed during backfill, pass an explicit embedding_backend.
 
     Args:
-        storage:     Storage backend. Defaults to create_storage().
-        routing:     Index routing strategy.
-        cursor_path: Path to the cursor file.
-        batch_size:  Embedding batch size.
-        dry_run:     Dry-run flag.
+        storage:           Storage backend. Defaults to create_storage().
+        routing:           Index routing strategy.
+        embedding_backend: Embedding backend. Defaults to None (preserve vectors).
+        cursor_path:       Path to the cursor file.
+        batch_size:        Embedding batch size.
+        dry_run:           Dry-run flag.
 
     Returns:
         Stats dict from EmbedAndIngestPipeline.run().
@@ -555,6 +620,7 @@ def run_backfill(
     return run_incremental(
         storage=storage,
         routing=routing,
+        embedding_backend=embedding_backend,
         force_full=True,
         cursor_path=cursor_path,
         batch_size=batch_size,
@@ -566,6 +632,7 @@ def upsert_by_show_id(
     show_id: str,
     storage: Optional[StorageBase] = None,
     routing: Optional[IndexRoutingStrategy] = None,
+    embedding_backend: Optional[EmbeddingBackend] = None,
     batch_size: int = 32,
     dry_run: bool = False,
 ) -> int:
@@ -575,11 +642,13 @@ def upsert_by_show_id(
     missing, without running the full backfill.
 
     Args:
-        show_id:    The show to re-ingest.
-        storage:    Storage backend. Defaults to create_storage().
-        routing:    Index routing strategy.
-        batch_size: Embedding batch size.
-        dry_run:    Dry-run flag.
+        show_id:           The show to re-ingest.
+        storage:           Storage backend. Defaults to create_storage().
+        routing:           Index routing strategy.
+        embedding_backend: Embedding backend. Defaults to LocalEmbeddingBackend().
+                           Pass None explicitly for BM25-only (preserve vectors).
+        batch_size:        Embedding batch size.
+        dry_run:           Dry-run flag.
 
     Returns:
         Number of episodes successfully ingested.
@@ -592,9 +661,12 @@ def upsert_by_show_id(
     if not matching:
         raise ValueError(f"show_id not found in storage: {show_id!r}")
 
+    _backend = embedding_backend if embedding_backend is not None else LocalEmbeddingBackend()
+
     pipeline = EmbedAndIngestPipeline(
         storage=_storage,
         routing_strategy=routing or LanguageSplitRoutingStrategy(),
+        embedding_backend=_backend,
         allowed_show_ids={show_id},
         batch_size=batch_size,
         dry_run=dry_run,
@@ -652,17 +724,29 @@ def run() -> None:
     setup_logging()
 
     mode = settings.SYNC_MODE
+    backend = LocalEmbeddingBackend()
 
     if mode == "single":
         if not args.show_id:
             raise SystemExit("--show-id is required when SYNC_MODE=single")
-        count = upsert_by_show_id(args.show_id, batch_size=args.batch_size, dry_run=args.dry_run)
+        count = upsert_by_show_id(
+            args.show_id,
+            embedding_backend=backend,
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+        )
         logger.info("upsert_complete", extra={"show_id": args.show_id, "episodes": count})
     elif mode == "backfill":
-        run_backfill(batch_size=args.batch_size, dry_run=args.dry_run)
+        # Backfill preserves existing vectors by default (embedding_backend=None)
+        run_backfill(
+            embedding_backend=None,
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+        )
     else:
         # incremental (default) or full
         run_incremental(
+            embedding_backend=backend,
             force_full=(mode == "full" or args.force_full),
             batch_size=args.batch_size,
             dry_run=args.dry_run,

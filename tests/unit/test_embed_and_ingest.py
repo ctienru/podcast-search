@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.embedding.backend import EmbeddingBackend
 from src.pipelines.embed_and_ingest import (
     EmbedAndIngestPipeline,
     emit_ingest_log,
@@ -119,7 +120,7 @@ def test_emit_ingest_log_handles_zero_total(caplog) -> None:
 def _make_pipeline() -> EmbedAndIngestPipeline:
     return EmbedAndIngestPipeline(
         es_service=MagicMock(),
-        encoder=MagicMock(),
+        embedding_backend=MagicMock(spec=EmbeddingBackend),
         routing_strategy=LanguageSplitRoutingStrategy(),
     )
 
@@ -164,6 +165,136 @@ def test_to_es_doc_returns_none_for_unknown_target_index() -> None:
     doc = pipeline.to_es_doc({"episode_id": "ep-2", "show_id": "show-1"}, [0.1] * 384)
 
     assert doc is None
+
+
+def test_to_es_doc_includes_embedding_when_vector_provided() -> None:
+    """A non-empty embedding vector must appear in _source['embedding']."""
+    pipeline = _make_pipeline()
+    _seed_caches(pipeline, "ep-vec", "podcast-episodes-zh-tw")
+
+    embedding = [0.1] * 768  # zh → 768 dim after Phase 3-A
+    doc = pipeline.to_es_doc({"episode_id": "ep-vec", "show_id": "show-1"}, embedding)
+
+    assert doc is not None
+    assert doc["_source"]["embedding"] == embedding
+
+
+def test_to_es_doc_omits_embedding_when_vector_is_empty() -> None:
+    """BM25-only mode: an empty embedding vector must not produce an 'embedding' field."""
+    pipeline = _make_pipeline()
+    _seed_caches(pipeline, "ep-bm25", "podcast-episodes-zh-tw")
+
+    doc = pipeline.to_es_doc({"episode_id": "ep-bm25", "show_id": "show-1"}, [])
+
+    assert doc is not None
+    assert "embedding" not in doc["_source"]
+
+
+# ── batch_encode ──────────────────────────────────────────────────────────────
+
+
+def _make_embedding_input(episode_id: str, show_id: str, text: str) -> dict:
+    return {"episode_id": episode_id, "show_id": show_id, "embedding_input": {"text": text}}
+
+
+def _seed_episode(
+    pipeline: EmbedAndIngestPipeline,
+    episode_id: str,
+    target_index: str,
+) -> None:
+    pipeline._show_cache["show-1"] = {"show_id": "show-1", "title": "T", "author": "A"}
+    pipeline._cleaned_episode_cache[episode_id] = {
+        "episode_id": episode_id,
+        "show_id": "show-1",
+        "target_index": target_index,
+        "cleaned": {"normalized": {"title": "T", "description": "D"}},
+        "original_meta": {
+            "pub_date": None,
+            "duration": None,
+            "audio_url": None,
+            "language": "zh-tw",
+            "image_url": None,
+            "itunes_summary": None,
+            "creator": None,
+            "episode_type": None,
+            "chapters": [],
+        },
+    }
+
+
+class TestBatchEncode:
+    def test_groups_same_language_into_single_embed_batch_call(self) -> None:
+        """Two zh-tw episodes must be passed to embed_batch in one call (not two)."""
+        mock_backend = MagicMock(spec=EmbeddingBackend)
+        mock_backend.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
+
+        pipeline = EmbedAndIngestPipeline(
+            es_service=MagicMock(),
+            embedding_backend=mock_backend,
+            routing_strategy=LanguageSplitRoutingStrategy(),
+        )
+        _seed_episode(pipeline, "ep-tw-1", "podcast-episodes-zh-tw")
+        _seed_episode(pipeline, "ep-tw-2", "podcast-episodes-zh-tw")
+
+        inputs = [
+            _make_embedding_input("ep-tw-1", "show-1", "text one"),
+            _make_embedding_input("ep-tw-2", "show-1", "text two"),
+        ]
+        pipeline.batch_encode(inputs)
+
+        zh_tw_calls = [
+            c for c in mock_backend.embed_batch.call_args_list
+            if c.args[1] == "zh-tw"
+        ]
+        assert len(zh_tw_calls) == 1, "both zh-tw texts must be in one embed_batch call"
+        assert len(zh_tw_calls[0].args[0]) == 2
+
+    def test_preserves_input_order_across_language_groups(self) -> None:
+        """Results must be in the same order as inputs, even when languages interleave."""
+        mock_backend = MagicMock(spec=EmbeddingBackend)
+
+        def embed_batch_side_effect(texts: list[str], language: str) -> list[list[float]]:
+            if language in ("zh-tw", "zh-cn"):
+                return [[0.9] * 768 for _ in texts]
+            return [[0.1] * 384 for _ in texts]
+
+        mock_backend.embed_batch.side_effect = embed_batch_side_effect
+
+        pipeline = EmbedAndIngestPipeline(
+            es_service=MagicMock(),
+            embedding_backend=mock_backend,
+            routing_strategy=LanguageSplitRoutingStrategy(),
+        )
+        _seed_episode(pipeline, "ep-zh", "podcast-episodes-zh-tw")
+        _seed_episode(pipeline, "ep-en", "podcast-episodes-en")
+
+        inputs = [
+            _make_embedding_input("ep-zh", "show-1", "zh text"),
+            _make_embedding_input("ep-en", "show-1", "en text"),
+        ]
+        results = pipeline.batch_encode(inputs)
+
+        assert len(results) == 2
+        inp0, vec0 = results[0]
+        inp1, vec1 = results[1]
+        assert inp0["episode_id"] == "ep-zh"
+        assert inp1["episode_id"] == "ep-en"
+        assert len(vec0) == 768   # zh vector
+        assert len(vec1) == 384   # en vector
+
+    def test_returns_empty_vectors_when_backend_is_none(self) -> None:
+        """BM25-only mode: batch_encode returns (input, []) for every item."""
+        pipeline = EmbedAndIngestPipeline(
+            es_service=MagicMock(),
+            embedding_backend=None,
+            routing_strategy=LanguageSplitRoutingStrategy(),
+        )
+        inputs = [_make_embedding_input("ep-x", "show-1", "some text")]
+        results = pipeline.batch_encode(inputs)
+
+        assert len(results) == 1
+        _, vec = results[0]
+        assert vec == []
 
 
 # ── load_cursor / save_cursor ─────────────────────────────────────────────────
