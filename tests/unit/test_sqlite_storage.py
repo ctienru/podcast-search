@@ -122,3 +122,93 @@ class TestGetShowsUpdatedSince:
         ))
         assert len(result) == 1
         assert result[0].show_id == "s1"
+
+
+class TestShowOptionalFields:
+    def test_image_url_parsed_from_json_column(self, db_path):
+        """image_url should be extracted from the image JSON column."""
+        _seed_db(db_path, [{
+            **_BASE_ROW,
+            "image": '{"url": "https://example.com/cover.jpg", "width": 3000}',
+        }])
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.image_url == "https://example.com/cover.jpg"
+
+    def test_external_urls_parsed_from_json_column(self, db_path):
+        """external_urls should be parsed from the external_urls JSON column."""
+        _seed_db(db_path, [{
+            **_BASE_ROW,
+            "external_urls": '{"apple_podcasts": "https://podcasts.apple.com/tw/podcast/123"}',
+        }])
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.external_urls == {"apple_podcasts": "https://podcasts.apple.com/tw/podcast/123"}
+
+    def test_categories_parsed_from_json_column(self, db_path):
+        """categories should be parsed from the categories JSON column."""
+        _seed_db(db_path, [{
+            **_BASE_ROW,
+            "categories": '["Technology", "Technology > AI"]',
+        }])
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.categories == ("Technology", "Technology > AI")
+
+    def test_null_image_returns_none(self, db_path):
+        """NULL image column should yield image_url=None."""
+        _seed_db(db_path, [{**_BASE_ROW, "image": None}])
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.image_url is None
+
+    def test_null_external_urls_returns_empty_dict(self, db_path):
+        """NULL external_urls column should yield external_urls={}."""
+        _seed_db(db_path, [{**_BASE_ROW, "external_urls": None}])
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.external_urls == {}
+
+    def test_null_categories_returns_empty_tuple(self, db_path):
+        """NULL categories column should yield categories=()."""
+        _seed_db(db_path, [{**_BASE_ROW, "categories": None}])
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.categories == ()
+
+    def test_malformed_json_returns_defaults(self, db_path):
+        """Malformed JSON in image/external_urls/categories should not raise."""
+        _seed_db(db_path, [{
+            **_BASE_ROW,
+            "image": "not-json",
+            "external_urls": "{broken",
+            "categories": "[bad",
+        }])
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.image_url is None
+        assert show.external_urls == {}
+        assert show.categories == ()
+
+    def test_scalar_fields_populated(self, db_path):
+        """provider, external_id, description, episode_count, last_episode_at populated."""
+        _seed_db(db_path, [{
+            **_BASE_ROW,
+            "provider": "apple",
+            "external_id": "77001367",
+            "description": "A great podcast.",
+            "episode_count": 42,
+            "last_episode_at": "2026-03-01T00:00:00Z",
+        }])
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.provider == "apple"
+        assert show.external_id == "77001367"
+        assert show.description == "A great podcast."
+        assert show.episode_count == 42
+        assert show.last_episode_at == "2026-03-01T00:00:00Z"
+
+    def test_missing_optional_columns_return_defaults(self, db_path):
+        """Rows without optional columns (e.g. older crawler versions) use defaults."""
+        _seed_db(db_path, [_BASE_ROW])  # _BASE_ROW has no optional columns
+        show = list(SQLiteStorage(db_path).get_shows())[0]
+        assert show.provider == ""
+        assert show.external_id == ""
+        assert show.description is None
+        assert show.image_url is None
+        assert show.external_urls == {}
+        assert show.episode_count is None
+        assert show.last_episode_at is None
+        assert show.categories == ()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -7,6 +8,21 @@ from sqlite_utils import Database
 
 from src.storage.base import StorageBase
 from src.types import Language, Show
+
+
+def _parse_json(value: str | None, fallback):
+    """Safely parse a SQLite JSON column that may be NULL or malformed.
+
+    Args:
+        value:    Raw string value from SQLite (may be None).
+        fallback: Returned when value is None, empty, or not valid JSON.
+    """
+    if not value:
+        return fallback
+    try:
+        return _json.loads(value)
+    except (ValueError, TypeError):
+        return fallback
 
 
 class SQLiteStorage(StorageBase):
@@ -64,6 +80,10 @@ class SQLiteStorage(StorageBase):
             params["language"] = language
 
         for row in self._db["shows"].rows_where(where, params):
+            image = _parse_json(row.get("image"), {})
+            external_urls = _parse_json(row.get("external_urls"), {})
+            raw_categories = _parse_json(row.get("categories"), [])
+
             yield Show(
                 show_id=row["show_id"],
                 title=row["title"],
@@ -74,4 +94,12 @@ class SQLiteStorage(StorageBase):
                 target_index=row["target_index"],
                 rss_feed_url=row["rss_feed_url"],
                 updated_at=row["updated_at"],
+                provider=row.get("provider") or "",
+                external_id=row.get("external_id") or "",
+                description=row.get("description"),
+                image_url=image.get("url") if isinstance(image, dict) else None,
+                external_urls=external_urls if isinstance(external_urls, dict) else {},
+                episode_count=row.get("episode_count"),
+                last_episode_at=row.get("last_episode_at"),
+                categories=tuple(raw_categories) if isinstance(raw_categories, list) else (),
             )
