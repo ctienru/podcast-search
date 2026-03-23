@@ -162,7 +162,7 @@ class TestToEsDoc:
         assert "web" not in source["external_urls"] or source["external_urls"].get("web") is None
 
 
-def _make_show(show_id: str = "show_123", language: str = "zh-tw") -> Show:
+def _make_show(show_id: str = "show_123", language: str = "zh-tw", **kwargs) -> Show:
     return Show(
         show_id=show_id,
         title="Test Podcast",
@@ -173,6 +173,7 @@ def _make_show(show_id: str = "show_123", language: str = "zh-tw") -> Show:
         target_index=f"podcast-episodes-{language}",
         rss_feed_url="http://feed.example/rss",
         updated_at="2026-01-01T00:00:00Z",
+        **kwargs,
     )
 
 
@@ -216,6 +217,55 @@ class TestLoadShows:
         shows = list(pipeline.load_shows())
 
         assert shows == []
+
+
+class TestShowFieldsFlowToEsDoc:
+    """Verify that Show dataclass optional fields reach the ES document via load_shows → to_es_doc."""
+
+    def _run(self, show: Show) -> dict:
+        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        shows = list(pipeline.load_shows.__func__(pipeline) if False else
+                     [pipeline._show_to_dict(show)])
+        return pipeline.to_es_doc(shows[0])["_source"]
+
+    def test_image_url_in_es_doc(self):
+        """image_url from Show should appear in the ES document."""
+        show = _make_show(image_url="https://example.com/cover.jpg", provider="apple")
+        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["image_url"] == "https://example.com/cover.jpg"
+
+    def test_external_url_in_es_doc(self):
+        """Apple Podcasts URL from Show.external_urls should appear in the ES document."""
+        show = _make_show(
+            provider="apple",
+            external_urls={"apple_podcasts": "https://podcasts.apple.com/tw/podcast/123"},
+        )
+        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["external_urls"]["apple_podcasts"] == "https://podcasts.apple.com/tw/podcast/123"
+
+    def test_episode_count_in_es_doc(self):
+        """episode_count from Show should appear in the ES document."""
+        show = _make_show(episode_count=42, last_episode_at="2026-03-01T00:00:00Z")
+        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["episode_count"] == 42
+        assert source["last_episode_at"] == "2026-03-01T00:00:00Z"
+
+    def test_description_in_es_doc(self):
+        """description from Show should appear in the ES document."""
+        show = _make_show(description="A great tech podcast.")
+        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["description"] == "A great tech podcast."
+
+    def test_null_image_url_yields_none(self):
+        """Show with no image_url should produce image_url=None in ES doc."""
+        show = _make_show()  # no image_url
+        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["image_url"] is None
 
 
 class TestBuildActions:

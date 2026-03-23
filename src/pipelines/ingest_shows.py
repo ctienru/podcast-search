@@ -36,17 +36,29 @@ class IngestShowsPipeline:
 
     @staticmethod
     def _show_to_dict(show: Show) -> Dict:
-        """Convert v2 Show dataclass to a dict compatible with to_es_doc.
+        """Convert Show dataclass to a dict for to_es_doc().
 
-        Fields not available in SQLite (external_urls, image, etc.) default
-        to None and will be omitted from the ES document.
+        Adapts the flat Show fields to the nested structure to_es_doc() expects:
+        - image_url  → {"image": {"url": ...}} so to_es_doc can call image.get("url")
+        - episode_count / last_episode_at → {"episode_stats": {...}}
+        - external_urls / provider / external_id passed through as-is
         """
         return {
-            "show_id": show.show_id,
-            "title": show.title,
-            "author": show.author,
-            "language": show.language_detected,
-            "updated_at": show.updated_at,
+            "show_id":      show.show_id,
+            "provider":     show.provider or "apple_podcasts",
+            "external_id":  show.external_id,
+            "title":        show.title,
+            "author":       show.author,
+            "description":  show.description,
+            "language":     show.language_detected,
+            "updated_at":   show.updated_at,
+            "image":        {"url": show.image_url} if show.image_url else {},
+            "external_urls": dict(show.external_urls),
+            "episode_stats": {
+                "episode_count":   show.episode_count,
+                "last_episode_at": show.last_episode_at,
+            },
+            "categories": list(show.categories),
         }
 
     def load_shows(self) -> Iterable[Dict]:
@@ -93,7 +105,7 @@ class IngestShowsPipeline:
 
                 # ---- external urls ----
                 "external_urls": {
-                    provider: external_url,
+                    external_url_key: external_url,
                 },
 
                 # ---- content ----
