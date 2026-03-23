@@ -122,9 +122,11 @@ class EmbedAndIngestPipeline:
         for show in self.storage.get_shows():
             if self.allowed_show_ids is None or show.show_id in self.allowed_show_ids:
                 self._show_cache[show.show_id] = {
-                    "show_id": show.show_id,
-                    "title": show.title,
-                    "author": show.author,
+                    "show_id":      show.show_id,
+                    "title":        show.title,
+                    "author":       show.author,
+                    "image_url":    show.image_url,
+                    "external_urls": dict(show.external_urls),
                 }
         logger.info("show_cache_loaded", extra={"count": len(self._show_cache)})
 
@@ -308,14 +310,8 @@ class EmbedAndIngestPipeline:
                     # Raw storage format (title/author at top level)
                     show_obj["title"] = show_data.get("title")
                     show_obj["publisher"] = show_data.get("author")
-
-                    # Add image_url from image.url
-                    image = show_data.get("image") or {}
-                    show_obj["image_url"] = image.get("url")
-
-                    # Add external_urls
-                    external_urls = show_data.get("external_urls") or {}
-                    show_obj["external_urls"] = external_urls
+                    show_obj["image_url"] = show_data.get("image_url")
+                    show_obj["external_urls"] = show_data.get("external_urls") or {}
 
         raw_target = cleaned_ep.get("target_index", "")
         try:

@@ -190,6 +190,49 @@ def test_to_es_doc_omits_embedding_when_vector_is_empty() -> None:
     assert "embedding" not in doc["_source"]
 
 
+# ── show subobject fields ─────────────────────────────────────────────────────
+
+
+def test_to_es_doc_includes_show_image_url() -> None:
+    """show.image_url from the cache must appear in the episode's show subobject."""
+    pipeline = _make_pipeline()
+    _seed_caches(pipeline, "ep-img", "podcast-episodes-zh-tw")
+    pipeline._show_cache["show-1"]["image_url"] = "https://example.com/cover.jpg"
+
+    doc = pipeline.to_es_doc({"episode_id": "ep-img", "show_id": "show-1"}, [])
+
+    assert doc is not None
+    assert doc["_source"]["show"]["image_url"] == "https://example.com/cover.jpg"
+
+
+def test_to_es_doc_includes_show_external_urls() -> None:
+    """show.external_urls from the cache must appear in the episode's show subobject."""
+    pipeline = _make_pipeline()
+    _seed_caches(pipeline, "ep-url", "podcast-episodes-zh-tw")
+    pipeline._show_cache["show-1"]["external_urls"] = {
+        "apple_podcasts": "https://podcasts.apple.com/tw/podcast/123"
+    }
+
+    doc = pipeline.to_es_doc({"episode_id": "ep-url", "show_id": "show-1"}, [])
+
+    assert doc is not None
+    assert doc["_source"]["show"]["external_urls"] == {
+        "apple_podcasts": "https://podcasts.apple.com/tw/podcast/123"
+    }
+
+
+def test_to_es_doc_show_image_url_defaults_to_none() -> None:
+    """When image_url is absent from the cache, show subobject image_url is None."""
+    pipeline = _make_pipeline()
+    _seed_caches(pipeline, "ep-noimg", "podcast-episodes-zh-tw")
+    # _seed_caches sets cache without image_url
+
+    doc = pipeline.to_es_doc({"episode_id": "ep-noimg", "show_id": "show-1"}, [])
+
+    assert doc is not None
+    assert doc["_source"]["show"].get("image_url") is None
+
+
 # ── batch_encode ──────────────────────────────────────────────────────────────
 
 
