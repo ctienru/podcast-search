@@ -12,6 +12,8 @@ Usage:
     python -m src.pipelines.embed_and_ingest
     python -m src.pipelines.embed_and_ingest --batch-size 64
     python -m src.pipelines.embed_and_ingest --dry-run
+    python -m src.pipelines.embed_and_ingest --force-full      # ignore cursor
+    python -m src.pipelines.embed_and_ingest --show-id <id>    # SYNC_MODE=single
 """
 
 import argparse
@@ -24,14 +26,18 @@ from typing import Dict, Generator, Iterable, Optional
 
 from elasticsearch.helpers import streaming_bulk
 
+from src.config import settings
 from src.embedding.encoder import EmbeddingEncoder
 from src.search.routing import IndexRoutingStrategy, LanguageSplitRoutingStrategy
 from src.services.es_service import ElasticsearchService
 from src.storage.base import StorageBase
 from src.storage.factory import create_storage
-from src.types import IndexAlias, IngestStats
+from src.types import IndexAlias, IngestCursor, IngestStats
 from src.utils.logging import setup_logging
 from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
+
+# All language-specific index aliases used by the v2 routing.
+_ALIASES: tuple[str, ...] = ("episodes-zh-tw", "episodes-zh-cn", "episodes-en")
 
 logger = logging.getLogger(__name__)
 logging.getLogger("elastic_transport").setLevel(logging.WARNING)
@@ -66,6 +72,7 @@ class EmbedAndIngestPipeline:
         dry_run: bool = False,
         storage: Optional[StorageBase] = None,
         routing_strategy: Optional[IndexRoutingStrategy] = None,
+        allowed_show_ids: Optional[set[str]] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.batch_size = batch_size
@@ -74,6 +81,7 @@ class EmbedAndIngestPipeline:
         self.routing_strategy: IndexRoutingStrategy = (
             routing_strategy or LanguageSplitRoutingStrategy()
         )
+        self.allowed_show_ids = allowed_show_ids  # None = process all shows
 
         # Lazy load encoder (it's heavy)
         self._encoder = encoder
@@ -103,13 +111,17 @@ class EmbedAndIngestPipeline:
         return self._encoder
 
     def _load_show_cache(self) -> None:
-        """Pre-load all show data from SQLiteStorage into memory."""
+        """Pre-load show data from SQLiteStorage into memory.
+
+        When allowed_show_ids is set, only those shows are loaded.
+        """
         for show in self.storage.get_shows():
-            self._show_cache[show.show_id] = {
-                "show_id": show.show_id,
-                "title": show.title,
-                "author": show.author,
-            }
+            if self.allowed_show_ids is None or show.show_id in self.allowed_show_ids:
+                self._show_cache[show.show_id] = {
+                    "show_id": show.show_id,
+                    "title": show.title,
+                    "author": show.author,
+                }
         logger.info("show_cache_loaded", extra={"count": len(self._show_cache)})
 
     def _load_cleaned_episode_cache(self) -> None:
@@ -127,7 +139,11 @@ class EmbedAndIngestPipeline:
                 with open(path, "r", encoding="utf-8") as f:
                     episode_data = json.load(f)
                     episode_id = episode_data.get("episode_id")
-                    if episode_id:
+                    show_id = episode_data.get("show_id")
+                    if episode_id and (
+                        self.allowed_show_ids is None
+                        or show_id in self.allowed_show_ids
+                    ):
                         self._cleaned_episode_cache[episode_id] = episode_data
                         loaded += 1
             except Exception as e:
@@ -160,12 +176,14 @@ class EmbedAndIngestPipeline:
         return sorted(self.EMBEDDING_INPUT_DIR.glob("*.json"))
 
     def load_embedding_inputs(self) -> Generator[Dict, None, None]:
-        """Load all embedding input files."""
+        """Load embedding input files, filtered to allowed_show_ids when set."""
         files = self.list_embedding_input_files()
         for f in files:
             try:
                 with open(f, "r", encoding="utf-8") as fp:
-                    yield json.load(fp)
+                    data = json.load(fp)
+                if self.allowed_show_ids is None or data.get("show_id") in self.allowed_show_ids:
+                    yield data
             except Exception as e:
                 logger.warning(
                     "embedding_input_load_failed",
@@ -415,6 +433,176 @@ class EmbedAndIngestPipeline:
         return stats
 
 
+def load_cursor(path: Optional[Path] = None) -> dict[str, IngestCursor]:
+    """Load per-index ingest cursor from a JSON file.
+
+    Returns an empty dict when the file does not exist (first run = full ingest).
+
+    Args:
+        path: Path to the cursor file. Defaults to settings.INGEST_CURSOR_PATH.
+
+    Returns:
+        Mapping of alias name → IngestCursor, or {} if the file is missing.
+    """
+    _path = path or settings.INGEST_CURSOR_PATH
+    if not _path.exists():
+        return {}
+    return json.loads(_path.read_text())
+
+
+def save_cursor(
+    cursors: dict[str, IngestCursor],
+    path: Optional[Path] = None,
+) -> None:
+    """Persist per-index ingest cursor to a JSON file.
+
+    Creates missing parent directories automatically.
+
+    Args:
+        cursors: Mapping of alias name → IngestCursor to persist.
+        path:    Destination path. Defaults to settings.INGEST_CURSOR_PATH.
+    """
+    _path = path or settings.INGEST_CURSOR_PATH
+    _path.parent.mkdir(parents=True, exist_ok=True)
+    _path.write_text(json.dumps(cursors, indent=2))
+
+
+def run_incremental(
+    storage: Optional[StorageBase] = None,
+    routing: Optional[IndexRoutingStrategy] = None,
+    force_full: bool = False,
+    cursor_path: Optional[Path] = None,
+    batch_size: int = 32,
+    dry_run: bool = False,
+) -> dict:
+    """Run ingest in incremental mode: only shows updated since the last run.
+
+    Uses a per-alias cursor to determine which shows to process. On the first
+    run (no cursor file), all shows are ingested. Saves an updated cursor after
+    a successful run.
+
+    Args:
+        storage:     Storage backend. Defaults to create_storage().
+        routing:     Index routing strategy. Defaults to LanguageSplitRoutingStrategy.
+        force_full:  Ignore the cursor and process all shows (e.g. after a
+                     mapping change). Equivalent to run_backfill().
+        cursor_path: Path to the cursor file. Defaults to settings.INGEST_CURSOR_PATH.
+        batch_size:  Embedding batch size passed to EmbedAndIngestPipeline.
+        dry_run:     Dry-run flag passed to EmbedAndIngestPipeline.
+
+    Returns:
+        Stats dict from EmbedAndIngestPipeline.run(), or
+        {"success": 0, "errors": 0, "total": 0} when no shows are updated.
+    """
+    _storage = storage or create_storage()
+    cursors = {} if force_full else load_cursor(cursor_path)
+    now = datetime.now(timezone.utc).isoformat()
+
+    if force_full:
+        allowed_show_ids: Optional[set[str]] = None
+    else:
+        since_values = [c.get("last_ingest_at", "") for c in cursors.values()]
+        since = min(since_values) if since_values else ""
+        updated = list(_storage.get_shows_updated_since(since))
+        if not updated:
+            logger.info("incremental_no_updates", extra={"since": since})
+            save_cursor(
+                {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _ALIASES},
+                cursor_path,
+            )
+            return {"success": 0, "errors": 0, "total": 0}
+        allowed_show_ids = {show.show_id for show in updated}
+        logger.info("incremental_updated_shows", extra={"count": len(allowed_show_ids), "since": since})
+
+    pipeline = EmbedAndIngestPipeline(
+        storage=_storage,
+        routing_strategy=routing or LanguageSplitRoutingStrategy(),
+        allowed_show_ids=allowed_show_ids,
+        batch_size=batch_size,
+        dry_run=dry_run,
+    )
+    stats = pipeline.run()
+
+    save_cursor(
+        {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _ALIASES},
+        cursor_path,
+    )
+    return stats
+
+
+def run_backfill(
+    storage: Optional[StorageBase] = None,
+    routing: Optional[IndexRoutingStrategy] = None,
+    cursor_path: Optional[Path] = None,
+    batch_size: int = 32,
+    dry_run: bool = False,
+) -> dict:
+    """Re-ingest all shows regardless of cursor (force_full=True).
+
+    Use this after adding a non-analyzer field to the mapping: it re-ingests
+    every document without re-computing embeddings.
+
+    Args:
+        storage:     Storage backend. Defaults to create_storage().
+        routing:     Index routing strategy.
+        cursor_path: Path to the cursor file.
+        batch_size:  Embedding batch size.
+        dry_run:     Dry-run flag.
+
+    Returns:
+        Stats dict from EmbedAndIngestPipeline.run().
+    """
+    return run_incremental(
+        storage=storage,
+        routing=routing,
+        force_full=True,
+        cursor_path=cursor_path,
+        batch_size=batch_size,
+        dry_run=dry_run,
+    )
+
+
+def upsert_by_show_id(
+    show_id: str,
+    storage: Optional[StorageBase] = None,
+    routing: Optional[IndexRoutingStrategy] = None,
+    batch_size: int = 32,
+    dry_run: bool = False,
+) -> int:
+    """Re-ingest all episodes for a single show.
+
+    Useful for targeted fixes when a single show's data is incorrect or
+    missing, without running the full backfill.
+
+    Args:
+        show_id:    The show to re-ingest.
+        storage:    Storage backend. Defaults to create_storage().
+        routing:    Index routing strategy.
+        batch_size: Embedding batch size.
+        dry_run:    Dry-run flag.
+
+    Returns:
+        Number of episodes successfully ingested.
+
+    Raises:
+        ValueError: If show_id is not found in storage.
+    """
+    _storage = storage or create_storage()
+    matching = [s for s in _storage.get_shows() if s.show_id == show_id]
+    if not matching:
+        raise ValueError(f"show_id not found in storage: {show_id!r}")
+
+    pipeline = EmbedAndIngestPipeline(
+        storage=_storage,
+        routing_strategy=routing or LanguageSplitRoutingStrategy(),
+        allowed_show_ids={show_id},
+        batch_size=batch_size,
+        dry_run=dry_run,
+    )
+    stats = pipeline.run()
+    return stats.get("success", 0)
+
+
 def emit_ingest_log(
     index_counts: Dict[str, int],
     language_distribution: Dict[str, int],
@@ -455,26 +643,30 @@ def emit_ingest_log(
 
 def run() -> None:
     parser = argparse.ArgumentParser(description="Embed and ingest episodes to ES")
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=32,
-        help="Batch size for embedding encoding (default: 32)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Dry run mode - don't actually ingest",
-    )
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force-full", action="store_true", help="Ignore cursor, process all shows")
+    parser.add_argument("--show-id", type=str, help="Show ID for single-show upsert (SYNC_MODE=single)")
     args = parser.parse_args()
 
     setup_logging()
 
-    pipeline = EmbedAndIngestPipeline(
-        batch_size=args.batch_size,
-        dry_run=args.dry_run,
-    )
-    pipeline.run()
+    mode = settings.SYNC_MODE
+
+    if mode == "single":
+        if not args.show_id:
+            raise SystemExit("--show-id is required when SYNC_MODE=single")
+        count = upsert_by_show_id(args.show_id, batch_size=args.batch_size, dry_run=args.dry_run)
+        logger.info("upsert_complete", extra={"show_id": args.show_id, "episodes": count})
+    elif mode == "backfill":
+        run_backfill(batch_size=args.batch_size, dry_run=args.dry_run)
+    else:
+        # incremental (default) or full
+        run_incremental(
+            force_full=(mode == "full" or args.force_full),
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+        )
 
 
 if __name__ == "__main__":
