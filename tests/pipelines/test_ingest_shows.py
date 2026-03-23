@@ -1,8 +1,9 @@
 """Tests for IngestShowsPipeline."""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import MagicMock
 from src.pipelines.ingest_shows import IngestShowsPipeline
+from src.types import Show
 
 
 class TestToEsDoc:
@@ -161,43 +162,60 @@ class TestToEsDoc:
         assert "web" not in source["external_urls"] or source["external_urls"].get("web") is None
 
 
+def _make_show(show_id: str = "show_123", language: str = "zh-tw") -> Show:
+    return Show(
+        show_id=show_id,
+        title="Test Podcast",
+        author="Test Author",
+        language_detected=language,
+        language_confidence=0.95,
+        language_uncertain=False,
+        target_index=f"podcast-episodes-{language}",
+        rss_feed_url="http://feed.example/rss",
+        updated_at="2026-01-01T00:00:00Z",
+    )
+
+
 class TestLoadShows:
     """Test the load_shows() method."""
 
-    @patch('src.pipelines.ingest_shows.storage')
-    def test_load_shows_success(self, mock_storage):
-        """Test successful loading of shows."""
-        show_data = {
-            "show_id": "show_123",
-            "title": "Test Podcast"
-        }
+    def test_load_shows_yields_all_shows(self) -> None:
+        """load_shows() should yield one dict per show returned by storage."""
+        mock_storage = MagicMock()
+        mock_storage.get_shows.return_value = iter([
+            _make_show("show_1"),
+            _make_show("show_2"),
+        ])
 
-        mock_storage.list_show_ids.return_value = ["show_123"]
-        mock_storage.load_show.return_value = show_data
-
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
-
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=mock_storage)
         shows = list(pipeline.load_shows())
 
-        assert len(shows) == 1
-        assert shows[0]["show_id"] == "show_123"
+        assert len(shows) == 2
+        assert shows[0]["show_id"] == "show_1"
+        assert shows[1]["show_id"] == "show_2"
 
-    @patch('src.pipelines.ingest_shows.storage')
-    def test_load_shows_with_missing_show(self, mock_storage, caplog):
-        """Test that missing shows are skipped with warning."""
-        mock_storage.list_show_ids.return_value = ["show_123", "show_456"]
-        mock_storage.load_show.side_effect = [
-            {"show_id": "show_123", "title": "Test 1"},
-            None  # Missing show
-        ]
+    def test_load_shows_maps_fields_correctly(self) -> None:
+        """_show_to_dict should map Show dataclass fields to the expected dict keys."""
+        mock_storage = MagicMock()
+        mock_storage.get_shows.return_value = iter([_make_show("show_123", "en")])
 
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
-
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=mock_storage)
         shows = list(pipeline.load_shows())
 
-        # Should only return the valid show
-        assert len(shows) == 1
         assert shows[0]["show_id"] == "show_123"
+        assert shows[0]["title"] == "Test Podcast"
+        assert shows[0]["author"] == "Test Author"
+        assert shows[0]["language"] == "en"
+
+    def test_load_shows_empty_storage(self) -> None:
+        """load_shows() should yield nothing when storage returns no shows."""
+        mock_storage = MagicMock()
+        mock_storage.get_shows.return_value = iter([])
+
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=mock_storage)
+        shows = list(pipeline.load_shows())
+
+        assert shows == []
 
 
 class TestBuildActions:
