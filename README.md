@@ -140,30 +140,23 @@ data/
 ../podcast-crawler/data/raw/rss/      # RSS XML files (shared with crawler)
 ```
 
-### 4. Run Pipelines
+### 4. Full Re-index (fresh ES)
+
+Use this when starting from a clean ES instance or after a mapping change.
 
 ```bash
-# Create 3 language indices and aliases (one-time setup)
+# Step 1 — Create 3 language indices + aliases (one-time)
 python -m src.pipelines.create_indices
 
-# Ingest shows from SQLite
+# Step 2 — Ingest shows from SQLite
 python -m src.pipelines.ingest_shows
 
-# Clean episodes: RSS XML → data/cleaned/episodes/
+# Step 3 — Clean episodes: RSS XML → data/cleaned/episodes/
 python -m src.pipelines.clean_episodes
 
-# Embed and ingest: cleaned JSON → ES (routed to correct language index)
-python -m src.pipelines.embed_and_ingest
+# Step 4 — Embed and ingest all episodes (full mode, re-embeds everything)
+SYNC_MODE=full python -m src.pipelines.embed_and_ingest
 ```
-
-**Sync modes** (controlled by `SYNC_MODE` env var):
-
-| Mode | Command | When to use |
-|------|---------|-------------|
-| `incremental` (default) | `python -m src.pipelines.embed_and_ingest` | New/updated shows since last run |
-| `full` | `SYNC_MODE=full python -m src.pipelines.embed_and_ingest` | Full re-ingest (after mapping change) |
-| `backfill` | `SYNC_MODE=backfill python -m src.pipelines.embed_and_ingest` | Populate a newly added field (skips re-embedding) |
-| `single` | `python -m src.pipelines.embed_and_ingest --show-id <id>` | Re-ingest one show |
 
 ### 5. Verify
 
@@ -173,6 +166,67 @@ GET episodes-zh-tw/_count
 GET episodes-zh-cn/_count
 GET episodes-en/_count
 GET shows/_count
+```
+
+---
+
+## Run Scenarios
+
+### Daily incremental sync (default)
+
+Only processes shows updated since the last run. Uses cursor in `data/ingest_cursor.json`.
+
+```bash
+python -m src.pipelines.ingest_shows
+python -m src.pipelines.clean_episodes
+python -m src.pipelines.embed_and_ingest
+# SYNC_MODE defaults to "incremental"
+```
+
+### Backfill a newly added non-analyzer field
+
+Use after adding a new field to the mapping that doesn't require re-tokenization (e.g. `image_url`, `episode_count`). Re-ingests all docs but **skips re-embedding** — existing vectors are preserved via ES update.
+
+```bash
+SYNC_MODE=backfill python -m src.pipelines.embed_and_ingest
+```
+
+### Force full re-ingest + re-embed
+
+Use after a mapping change that affects analyzers, or after switching embedding models.
+
+```bash
+SYNC_MODE=full python -m src.pipelines.embed_and_ingest
+```
+
+### Re-ingest a single show
+
+Use to fix a specific show without touching anything else.
+
+```bash
+python -m src.pipelines.embed_and_ingest --show-id show:apple:12345678
+```
+
+### Re-index with new embedding model (alias switch pattern)
+
+Use after upgrading the embedding model (e.g. Phase 3-A: bge-zh upgrade).
+
+```bash
+# 1. Bump INDEX_VERSION to create a new backing index
+INDEX_VERSION=2 python -m src.pipelines.create_indices
+
+# 2. Full re-embed into the new index
+INDEX_VERSION=2 SYNC_MODE=full python -m src.pipelines.embed_and_ingest
+
+# 3. Verify counts match, run regression gate
+python scripts/check_regression_gate.py
+
+# 4. Switch alias (run in Kibana)
+# POST /_aliases
+# { "actions": [
+#     { "remove": { "index": "podcast-episodes-zh-tw-v1", "alias": "episodes-zh-tw" } },
+#     { "add":    { "index": "podcast-episodes-zh-tw-v2", "alias": "episodes-zh-tw" } }
+# ] }
 ```
 
 ## API Endpoints
@@ -232,7 +286,9 @@ Episode document:
   "show": {
     "show_id": "...",
     "title": "Show Title",
-    "publisher": "Author Name"
+    "publisher": "Author Name",
+    "image_url": "https://example.com/cover.jpg",
+    "external_urls": { "apple_podcasts": "https://podcasts.apple.com/..." }
   },
   "audio": { "url": "https://..." }
 }
@@ -244,9 +300,16 @@ Episode document:
 {
   "show_id": "...",
   "title": "Show Title",
-  "author": "Author Name",
+  "publisher": "Author Name",
+  "description": "Show description...",
   "language": "zh-tw",
-  "updated_at": "2026-01-18T06:00:00Z"
+  "image_url": "https://example.com/cover.jpg",
+  "external_ids": { "apple_podcasts": "12345678" },
+  "external_urls": { "apple_podcasts": "https://podcasts.apple.com/..." },
+  "categories": ["Technology", "Technology > AI"],
+  "episode_count": 150,
+  "last_episode_at": "2026-03-20T00:00:00Z",
+  "updated_at": "2026-03-20T00:00:00Z"
 }
 ```
 
