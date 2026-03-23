@@ -175,7 +175,7 @@ def _print_alias_switch_commands(index_version: int) -> None:
     print('  "actions": [')
     for lang in ("zh-tw", "zh-cn", "en"):
         alias = f"episodes-{lang}"
-        index = f"podcast-episodes-{lang}-v{index_version}"
+        index = f"podcast-episodes-{lang}_v{index_version}"
         print(f'    {{ "remove": {{ "index": "*", "alias": "{alias}" }} }},')
         print(f'    {{ "add":    {{ "index": "{index}", "alias": "{alias}" }} }},')
     print("  ]")
