@@ -56,6 +56,7 @@ jobs:
       - name: Run NDCG evaluation
         env:
           ES_HOST: http://localhost:9200
+          PYTHONPATH: .
         run: |
           python scripts/evaluate_ndcg_mrr.py \
             --queries data/evaluation/test_queries.json \
