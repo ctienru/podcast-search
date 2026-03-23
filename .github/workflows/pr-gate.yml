@@ -1,0 +1,66 @@
+name: PR Gate
+
+on:
+  pull_request:
+
+jobs:
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: pytest tests/unit/ tests/pipelines/ -v --tb=short
+
+  ndcg-regression:
+    runs-on: ubuntu-latest
+
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run NDCG evaluation
+        env:
+          ES_HOST: http://localhost:9200
+        run: |
+          python scripts/evaluate_ndcg_mrr.py \
+            --queries data/evaluation/test_queries.json \
+            --judgments data/evaluation/relevance_judgments.json \
+            --output data/evaluation/ndcg_mrr_report.json
+
+      - name: Check regression gate
+        run: python scripts/check_regression_gate.py --report data/evaluation/ndcg_mrr_report.json
