@@ -151,7 +151,9 @@ def test_to_es_doc_routes_to_language_alias() -> None:
     pipeline = _make_pipeline()
     _seed_caches(pipeline, "ep-1", "podcast-episodes-zh-tw")
 
-    doc = pipeline.to_es_doc({"episode_id": "ep-1", "show_id": "show-1"}, [0.1] * 384)
+    with patch("src.pipelines.embed_and_ingest.settings") as mock_settings:
+        mock_settings.ENABLE_LANGUAGE_SPLIT = True
+        doc = pipeline.to_es_doc({"episode_id": "ep-1", "show_id": "show-1"}, [0.1] * 384)
 
     assert doc is not None
     assert doc["_index"] == "episodes-zh-tw"
@@ -162,7 +164,9 @@ def test_to_es_doc_returns_none_for_unknown_target_index() -> None:
     pipeline = _make_pipeline()
     _seed_caches(pipeline, "ep-2", "podcast-episodes-jp")  # unmapped
 
-    doc = pipeline.to_es_doc({"episode_id": "ep-2", "show_id": "show-1"}, [0.1] * 384)
+    with patch("src.pipelines.embed_and_ingest.settings") as mock_settings:
+        mock_settings.ENABLE_LANGUAGE_SPLIT = True
+        doc = pipeline.to_es_doc({"episode_id": "ep-2", "show_id": "show-1"}, [0.1] * 384)
 
     assert doc is None
 
@@ -180,14 +184,16 @@ def test_to_es_doc_includes_embedding_when_vector_provided() -> None:
 
 
 def test_to_es_doc_omits_embedding_when_vector_is_empty() -> None:
-    """BM25-only mode: an empty embedding vector must not produce an 'embedding' field."""
+    """BM25-only mode: uses ES update semantics (doc key, not _source)."""
     pipeline = _make_pipeline()
     _seed_caches(pipeline, "ep-bm25", "podcast-episodes-zh-tw")
 
     doc = pipeline.to_es_doc({"episode_id": "ep-bm25", "show_id": "show-1"}, [])
 
     assert doc is not None
-    assert "embedding" not in doc["_source"]
+    assert doc["_op_type"] == "update"
+    assert "doc_as_upsert" in doc
+    assert "embedding" not in doc["doc"]
 
 
 # ── show subobject fields ─────────────────────────────────────────────────────
@@ -201,8 +207,9 @@ def test_to_es_doc_includes_show_image_url() -> None:
 
     doc = pipeline.to_es_doc({"episode_id": "ep-img", "show_id": "show-1"}, [])
 
+    # BM25-only path uses update semantics → content is under "doc", not "_source"
     assert doc is not None
-    assert doc["_source"]["show"]["image_url"] == "https://example.com/cover.jpg"
+    assert doc["doc"]["show"]["image_url"] == "https://example.com/cover.jpg"
 
 
 def test_to_es_doc_includes_show_external_urls() -> None:
@@ -216,7 +223,7 @@ def test_to_es_doc_includes_show_external_urls() -> None:
     doc = pipeline.to_es_doc({"episode_id": "ep-url", "show_id": "show-1"}, [])
 
     assert doc is not None
-    assert doc["_source"]["show"]["external_urls"] == {
+    assert doc["doc"]["show"]["external_urls"] == {
         "apple_podcasts": "https://podcasts.apple.com/tw/podcast/123"
     }
 
@@ -230,7 +237,7 @@ def test_to_es_doc_show_image_url_defaults_to_none() -> None:
     doc = pipeline.to_es_doc({"episode_id": "ep-noimg", "show_id": "show-1"}, [])
 
     assert doc is not None
-    assert doc["_source"]["show"].get("image_url") is None
+    assert doc["doc"]["show"].get("image_url") is None
 
 
 # ── batch_encode ──────────────────────────────────────────────────────────────

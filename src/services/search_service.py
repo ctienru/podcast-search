@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional
 
 from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
 from src.es.client import get_es_client
+from src.types import Language
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +334,7 @@ class SearchService:
         self,
         query: str,
         size: int = 10,
+        language: Language = "zh-tw",
     ) -> SearchResponse:
         """
         Pure kNN semantic search.
@@ -340,12 +342,14 @@ class SearchService:
         Args:
             query: Search query text (will be encoded to vector)
             size: Number of results to return
+            language: Language of the query. Must match the target index language
+                so the correct embedding model and vector space are used.
+                Passing the wrong language silently returns wrong results.
 
         Returns:
             SearchResponse with results
         """
-        # Encode query to vector (default zh-tw for evaluation; override via language param)
-        query_vector = self.encoder.embed(query, language="zh-tw")
+        query_vector = self.encoder.embed(query, language=language)
 
         body = {
             "knn": self._build_knn_clause(query_vector, k=size),
@@ -419,6 +423,7 @@ class SearchService:
         size: int = 10,
         rrf_window_size: Optional[int] = None,
         rrf_rank_constant: Optional[int] = None,
+        language: Language = "zh-tw",
     ) -> SearchResponse:
         """
         Hybrid search combining BM25 and kNN with RRF fusion.
@@ -436,6 +441,8 @@ class SearchService:
             size: Number of results to return
             rrf_window_size: Number of results to consider for RRF (default: 100)
             rrf_rank_constant: RRF constant k (default: 60)
+            language: Language of the query, passed through to search_knn() for
+                correct embedding model selection.
 
         Returns:
             SearchResponse with results
@@ -448,7 +455,7 @@ class SearchService:
 
         # Get results from both methods
         bm25_response = self.search_bm25(query, size=window_size)
-        knn_response = self.search_knn(query, size=window_size)
+        knn_response = self.search_knn(query, size=window_size, language=language)
 
         # Compute RRF scores
         rrf_scores = self._compute_rrf_scores(
@@ -510,6 +517,7 @@ class SearchService:
         query: str,
         mode: SearchMode = SearchMode.HYBRID,
         size: int = 10,
+        language: Language = "zh-tw",
         **kwargs,
     ) -> SearchResponse:
         """
@@ -519,7 +527,9 @@ class SearchService:
             query: Search query text
             mode: Search mode (BM25, KNN, HYBRID, or EXACT)
             size: Number of results to return
-            **kwargs: Additional arguments for specific search modes
+            language: Language of the query, passed to KNN/hybrid embedding.
+                BM25 and EXACT modes ignore this parameter.
+            **kwargs: Additional arguments forwarded to the underlying search method
 
         Returns:
             SearchResponse with results
@@ -527,8 +537,8 @@ class SearchService:
         if mode == SearchMode.BM25:
             return self.search_bm25(query, size=size)
         elif mode == SearchMode.KNN:
-            return self.search_knn(query, size=size)
+            return self.search_knn(query, size=size, language=language)
         elif mode == SearchMode.EXACT:
             return self.search_exact(query, size=size)
         else:
-            return self.search_hybrid(query, size=size, **kwargs)
+            return self.search_hybrid(query, size=size, language=language, **kwargs)

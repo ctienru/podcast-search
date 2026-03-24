@@ -249,7 +249,7 @@ class TestSearchKnn:
         service = SearchService(encoder=mock_encoder)
         service.search_knn("test query", size=5)
 
-        mock_encoder.encode.assert_called_once_with("test query")
+        mock_encoder.embed.assert_called_once_with("test query", language="zh-tw")
 
     def test_search_knn_builds_knn_clause(self, mock_es_client, mock_encoder):
         """Test kNN search builds correct kNN clause."""

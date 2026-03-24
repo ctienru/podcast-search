@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-from src.types import Language
+from src.types import Language, LangParam
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class ClickLogEntry:
     request_id:         str
     timestamp:          str
     query:              str
-    selected_lang:      Language
+    selected_lang:      LangParam
     clicked_episode_id: str
     clicked_rank:       int
     clicked_language:   Language

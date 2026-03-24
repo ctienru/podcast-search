@@ -38,6 +38,12 @@ from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
 # All language-specific index aliases used by the v2 routing.
 _ALIASES: tuple[str, ...] = ("episodes-zh-tw", "episodes-zh-cn", "episodes-en")
 
+# Sentinel for distinguishing "not provided" from explicit None (BM25-only).
+# run_incremental() and upsert_by_show_id() default embedding_backend to _UNSET,
+# which is replaced with LocalEmbeddingBackend() at call time.
+# Callers that pass None explicitly get BM25-only mode (vectors preserved).
+_UNSET: object = object()
+
 # Legacy v1 alias used when ENABLE_LANGUAGE_SPLIT=False.
 _LEGACY_ALIAS = "episodes"
 
@@ -535,7 +541,7 @@ def save_cursor(
 def run_incremental(
     storage: Optional[StorageBase] = None,
     routing: Optional[IndexRoutingStrategy] = None,
-    embedding_backend: Optional[EmbeddingBackend] = None,
+    embedding_backend: Optional[EmbeddingBackend] = _UNSET,  # type: ignore[assignment]
     force_full: bool = False,
     cursor_path: Optional[Path] = None,
     batch_size: int = 32,
@@ -550,8 +556,10 @@ def run_incremental(
     Args:
         storage:           Storage backend. Defaults to create_storage().
         routing:           Index routing strategy. Defaults to LanguageSplitRoutingStrategy.
-        embedding_backend: Embedding backend. Defaults to LocalEmbeddingBackend().
-                           Pass None explicitly for BM25-only mode.
+        embedding_backend: Embedding backend.
+                           Omit (default) → LocalEmbeddingBackend() is used.
+                           Pass None explicitly → BM25-only mode; existing ES vectors
+                           are preserved via update semantics.
         force_full:        Ignore the cursor and process all shows (e.g. after a
                            mapping change). Equivalent to run_backfill().
         cursor_path:       Path to the cursor file. Defaults to settings.INGEST_CURSOR_PATH.
@@ -563,7 +571,9 @@ def run_incremental(
         {"success": 0, "errors": 0, "total": 0} when no shows are updated.
     """
     _storage = storage or create_storage()
-    _backend = embedding_backend if embedding_backend is not None else LocalEmbeddingBackend()
+    _backend: Optional[EmbeddingBackend] = (
+        LocalEmbeddingBackend() if embedding_backend is _UNSET else embedding_backend
+    )
     cursors = {} if force_full else load_cursor(cursor_path)
     now = datetime.now(timezone.utc).isoformat()
 
@@ -642,7 +652,7 @@ def upsert_by_show_id(
     show_id: str,
     storage: Optional[StorageBase] = None,
     routing: Optional[IndexRoutingStrategy] = None,
-    embedding_backend: Optional[EmbeddingBackend] = None,
+    embedding_backend: Optional[EmbeddingBackend] = _UNSET,  # type: ignore[assignment]
     batch_size: int = 32,
     dry_run: bool = False,
 ) -> int:
@@ -655,8 +665,10 @@ def upsert_by_show_id(
         show_id:           The show to re-ingest.
         storage:           Storage backend. Defaults to create_storage().
         routing:           Index routing strategy.
-        embedding_backend: Embedding backend. Defaults to LocalEmbeddingBackend().
-                           Pass None explicitly for BM25-only (preserve vectors).
+        embedding_backend: Embedding backend.
+                           Omit (default) → LocalEmbeddingBackend() is used.
+                           Pass None explicitly → BM25-only mode; existing vectors
+                           are preserved via update semantics.
         batch_size:        Embedding batch size.
         dry_run:           Dry-run flag.
 
@@ -667,11 +679,13 @@ def upsert_by_show_id(
         ValueError: If show_id is not found in storage.
     """
     _storage = storage or create_storage()
-    matching = [s for s in _storage.get_shows() if s.show_id == show_id]
-    if not matching:
+    _show = next((s for s in _storage.get_shows() if s.show_id == show_id), None)
+    if _show is None:
         raise ValueError(f"show_id not found in storage: {show_id!r}")
 
-    _backend = embedding_backend if embedding_backend is not None else LocalEmbeddingBackend()
+    _backend: Optional[EmbeddingBackend] = (
+        LocalEmbeddingBackend() if embedding_backend is _UNSET else embedding_backend
+    )
 
     pipeline = EmbedAndIngestPipeline(
         storage=_storage,
