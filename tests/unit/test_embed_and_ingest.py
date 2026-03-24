@@ -460,6 +460,48 @@ class TestRunIncremental:
         assert result["success"] == 0
 
 
+    def test_allowed_show_ids_restricts_force_full_to_specified_shows(self, tmp_path: Path) -> None:
+        """force_full=True + allowed_show_ids must only process the specified shows."""
+        cursor_path = tmp_path / "cursor.json"
+        storage = _FakeStorage(shows=[_make_show("s1"), _make_show("s2")])
+
+        with patch("src.pipelines.embed_and_ingest.EmbedAndIngestPipeline") as MockPipeline:
+            MockPipeline.return_value.run.return_value = {"success": 3, "errors": 0, "total": 3}
+            run_incremental(
+                storage=storage,
+                force_full=True,
+                cursor_path=cursor_path,
+                allowed_show_ids={"s1"},
+            )
+
+        call_kwargs = MockPipeline.call_args.kwargs
+        assert call_kwargs["allowed_show_ids"] == {"s1"}
+
+    def test_allowed_show_ids_intersects_with_cursor_updated_shows(self, tmp_path: Path) -> None:
+        """allowed_show_ids must be intersected with cursor-updated shows in incremental mode."""
+        cursor_path = tmp_path / "cursor.json"
+        save_cursor(
+            {"episodes-zh-tw": {"last_ingest_at": "2026-03-01T00:00:00Z", "last_run_at": "2026-03-01T00:00:00Z"}},
+            cursor_path,
+        )
+        # Only s1 is returned as updated by cursor; s2 is in allowed but not updated
+        storage = _FakeStorage(
+            shows=[_make_show("s1"), _make_show("s2")],
+            updated_shows=[_make_show("s1")],
+        )
+
+        with patch("src.pipelines.embed_and_ingest.EmbedAndIngestPipeline") as MockPipeline:
+            MockPipeline.return_value.run.return_value = {"success": 1, "errors": 0, "total": 1}
+            run_incremental(
+                storage=storage,
+                cursor_path=cursor_path,
+                allowed_show_ids={"s1", "s2"},
+            )
+
+        call_kwargs = MockPipeline.call_args.kwargs
+        assert call_kwargs["allowed_show_ids"] == {"s1"}  # intersection: s2 not updated
+
+
 # ── run_backfill ──────────────────────────────────────────────────────────────
 
 
