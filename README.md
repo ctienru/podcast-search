@@ -259,19 +259,27 @@ curl -X POST http://localhost:8000/embed \
 | `QUERY_LOG_PATH` | `logs/query_log.jsonl` | Query behavioral log |
 | `CLICK_LOG_PATH` | `logs/click_log.jsonl` | Click behavioral log |
 | `INGEST_CURSOR_PATH` | `data/ingest_cursor.json` | Incremental ingest cursor |
+| `ENABLE_LANGUAGE_SPLIT` | `true` | Use 3-index language-split layout (v2 default) |
 | `EMBEDDING_API_URL` | — | External embedding API URL (Phase 3-B) |
 | `EMBEDDING_API_KEY` | — | External embedding API key (Phase 3-B) |
 
 ## ES Index Structure
 
-### Episodes Indices (3 language-split indices)
+### Index Naming Convention
+
+All podcast indices follow `podcast-{type}-{qualifier}_v{N}`:
 
 ```
 alias              → backing index
-episodes-zh-tw     → podcast-episodes-zh-tw-v{N}    (Traditional Chinese, IK analyzer)
-episodes-zh-cn     → podcast-episodes-zh-cn-v{N}    (Simplified Chinese, IK analyzer)
-episodes-en        → podcast-episodes-en-v{N}        (English, standard analyzer)
+shows              → podcast-shows_v{N}
+episodes-zh-tw     → podcast-episodes-zh-tw_v{N}    (Traditional Chinese, IK analyzer)
+episodes-zh-cn     → podcast-episodes-zh-cn_v{N}    (Simplified Chinese, IK analyzer)
+episodes-en        → podcast-episodes-en_v{N}        (English, standard analyzer)
 ```
+
+Backend always uses alias names — never the backing index name directly.
+
+### Episodes Indices (3 language-split indices)
 
 Episode document:
 ```json
