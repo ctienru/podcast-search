@@ -40,7 +40,7 @@ def create_mock_es_response(hits: list[dict], total: int = 10, took: int = 5):
     }
 
 
-def create_mock_hit(episode_id: str, title: str, score: float = 1.0):
+def create_mock_hit(episode_id: str, title: str, score: float = 1.0, show_id: str = "show_123"):
     """Create a mock Elasticsearch hit."""
     return {
         "_id": episode_id,
@@ -50,7 +50,7 @@ def create_mock_hit(episode_id: str, title: str, score: float = 1.0):
             "title": title,
             "description": f"Description for {title}",
             "show": {
-                "show_id": "show_123",
+                "show_id": show_id,
                 "title": "Test Show",
             },
             "published_at": "2024-01-01T00:00:00Z",
@@ -384,6 +384,51 @@ class TestUnifiedSearch:
         response = service.search("query")
 
         assert response.mode == SearchMode.HYBRID
+
+
+class TestSearchHybridDiversity:
+    """Test per-show diversity cap in hybrid search."""
+
+    def test_per_show_cap_is_enforced(self, mock_es_client, mock_encoder):
+        """Test that no single show appears more than MAX_PER_SHOW times in results."""
+        # One dominant show has 8 episodes, one other show has 2 episodes
+        dominant_hits = [
+            create_mock_hit(f"dom_{i}", f"Dominant Ep {i}", score=1.0 - i * 0.01, show_id="dominant_show")
+            for i in range(8)
+        ]
+        other_hits = [
+            create_mock_hit(f"other_{i}", f"Other Ep {i}", score=0.5, show_id="other_show")
+            for i in range(2)
+        ]
+        mock_es_client.search.return_value = create_mock_es_response(
+            hits=dominant_hits + other_hits,
+            total=10,
+        )
+
+        service = SearchService(encoder=mock_encoder)
+        response = service.search_hybrid("test query", size=10)
+
+        show_counts: dict[str, int] = {}
+        for r in response.results:
+            show_counts[r.show_id or "unknown"] = show_counts.get(r.show_id or "unknown", 0) + 1
+
+        assert all(count <= SearchService.MAX_PER_SHOW for count in show_counts.values())
+        assert show_counts.get("dominant_show", 0) <= SearchService.MAX_PER_SHOW
+
+    def test_diversity_cap_does_not_drop_results_when_enough_shows(self, mock_es_client, mock_encoder):
+        """Test that size results are still returned when enough diverse shows exist."""
+        # 4 shows, each with 5 episodes
+        hits = [
+            create_mock_hit(f"show{s}_ep{e}", f"Show {s} Ep {e}", show_id=f"show_{s}")
+            for s in range(4)
+            for e in range(5)
+        ]
+        mock_es_client.search.return_value = create_mock_es_response(hits=hits, total=20)
+
+        service = SearchService(encoder=mock_encoder)
+        response = service.search_hybrid("test query", size=10)
+
+        assert len(response.results) == 10
 
 
 class TestBuildExactQuery:

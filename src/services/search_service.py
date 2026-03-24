@@ -81,6 +81,9 @@ class SearchService:
     RRF_WINDOW_SIZE = 100
     RRF_RANK_CONSTANT = 60
 
+    # Diversity: max results from the same show in a single response
+    MAX_PER_SHOW = 3
+
     # kNN parameters
     KNN_NUM_CANDIDATES = 100
 
@@ -455,7 +458,16 @@ class SearchService:
 
         # Get results from both methods
         bm25_response = self.search_bm25(query, size=window_size)
-        knn_response = self.search_knn(query, size=window_size, language=language)
+        try:
+            knn_response = self.search_knn(query, size=window_size, language=language)
+        except Exception as e:
+            # kNN can fail when the index has mixed embedding dimensions (e.g. cross-language alias).
+            # Fall back to BM25-only results so hybrid search degrades gracefully.
+            logger.warning(
+                "search_knn_failed_in_hybrid_fallback_to_bm25",
+                extra={"query": query, "reason": str(e)},
+            )
+            knn_response = SearchResponse(results=[], total=0, took_ms=0, mode=SearchMode.KNN)
 
         # Compute RRF scores
         rrf_scores = self._compute_rrf_scores(
@@ -470,13 +482,19 @@ class SearchService:
             if result.episode_id not in result_map:
                 result_map[result.episode_id] = result
 
-        # Sort by RRF score and take top results
+        # Sort by RRF score and take top results, capped per show for diversity
         sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
 
         results = []
-        for episode_id in sorted_ids[:size]:
+        show_counts: Dict[str, int] = {}
+        for episode_id in sorted_ids:
+            if len(results) >= size:
+                break
             result = result_map[episode_id]
-            # Update score to RRF score
+            show_id = result.show_id or "__unknown__"
+            if show_counts.get(show_id, 0) >= self.MAX_PER_SHOW:
+                continue
+            show_counts[show_id] = show_counts.get(show_id, 0) + 1
             results.append(SearchResult(
                 episode_id=result.episode_id,
                 title=result.title,
