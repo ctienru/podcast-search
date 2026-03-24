@@ -192,7 +192,9 @@ def test_to_es_doc_omits_embedding_when_vector_is_empty() -> None:
 
     assert doc is not None
     assert doc["_op_type"] == "update"
-    assert "doc_as_upsert" in doc
+    assert "upsert" in doc          # first-insert path carries created_at
+    assert "doc_as_upsert" not in doc
+    assert "created_at" not in doc["doc"]   # partial update must not overwrite created_at
     assert "embedding" not in doc["doc"]
 
 

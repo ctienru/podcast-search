@@ -375,13 +375,16 @@ class EmbedAndIngestPipeline:
                 "_source": source,
             }
 
-        # BM25-only mode: use partial update to preserve any existing embedding vector.
+        # BM25-only mode: preserve any existing embedding vector and created_at timestamp.
+        # doc omits created_at so it is not overwritten on existing documents;
+        # upsert (first-insert path) includes created_at.
+        update_doc = {k: v for k, v in source.items() if k != "created_at"}
         return {
             "_op_type": "update",
             "_index": index_alias,
             "_id": episode_id,
-            "doc": source,
-            "doc_as_upsert": True,
+            "doc": update_doc,
+            "upsert": source,
         }
 
     def build_actions(
