@@ -63,8 +63,8 @@ class QueryLogger:
     """Appends QueryLogEntry records to a JSONL file.
 
     Args:
-        log_path: Path to the JSONL log file. Parent directory must exist.
-            File is created on first write.
+        log_path: Path to the JSONL log file. Parent directory will be created
+            if needed; the file is created on first write.
     """
 
     def __init__(self, log_path: Path) -> None:

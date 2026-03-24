@@ -89,7 +89,7 @@ class LocalStorage(StorageBase):
                 author=data.get("author", ""),
                 language_detected=detected,
                 language_confidence=data.get("language_confidence", 0.0),
-                language_uncertain=data.get("language_uncertain", True),
+                language_uncertain=bool(data.get("language_uncertain", True)),
                 target_index=data.get("target_index", ""),
                 rss_feed_url=data.get("rss_feed_url", ""),
                 updated_at=updated_at,
