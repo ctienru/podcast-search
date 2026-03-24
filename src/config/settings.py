@@ -34,7 +34,7 @@ SYNC_MODE = os.getenv("SYNC_MODE", "incremental")  # full, incremental, backfill
 BACKFILL_FROM = os.getenv("BACKFILL_FROM")  # Timestamp for backfill mode
 
 # v2: Language split feature flag
-ENABLE_LANGUAGE_SPLIT: bool = os.getenv("ENABLE_LANGUAGE_SPLIT", "false").lower() == "true"
+ENABLE_LANGUAGE_SPLIT: bool = os.getenv("ENABLE_LANGUAGE_SPLIT", "true").lower() == "true"
 
 # v2: SQLite data source (produced by podcast-crawler v2)
 SQLITE_PATH: Path = Path(os.getenv("SQLITE_PATH", str(DATA_DIR / "crawler.db")))

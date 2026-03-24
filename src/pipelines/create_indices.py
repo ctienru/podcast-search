@@ -192,7 +192,21 @@ class CreateIndicesPipeline:
 
     def _run_language_split(self) -> None:
         """v2: create three language-specific episode indices plus the shows index."""
-        self.run_for_index("shows")
+        # shows: base_name uses podcast- prefix to match infra naming convention
+        shows_base = "podcast-shows"
+        shows_alias = "shows"
+        new_shows_index = self.create_versioned_index(shows_base, mapping_key="shows")
+
+        old_shows: Optional[str] = None
+        if self.index_version > 1:
+            old_shows = f"{shows_base}_v{self.index_version - 1}"
+            if not self.es.index_exists(old_shows):
+                old_shows = shows_alias if self.es.alias_exists(shows_alias) else None
+
+        if old_shows:
+            self.reindex_if_needed(old_shows, new_shows_index)
+
+        self.switch_alias(shows_alias, new_shows_index)
 
         for lang in ("zh-tw", "zh-cn", "en"):
             base_name = f"podcast-episodes-{lang}"

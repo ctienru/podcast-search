@@ -326,3 +326,67 @@ class TestRunForIndex:
 
         # Should reindex from alias instead
         mock_es.reindex.assert_called_once_with("shows", "shows_v5")
+
+
+class TestRunLanguageSplit:
+    """Test the _run_language_split() orchestration method."""
+
+    def _make_pipeline(self, index_version=1, reindex=False):
+        mock_es = MagicMock()
+        mock_es.index_exists.return_value = False
+        mock_es.alias_exists.return_value = False
+        mock_loader = MagicMock()
+        mock_loader.load.return_value = {"mappings": {}}
+        return CreateIndicesPipeline(
+            es_service=mock_es,
+            mapping_loader=mock_loader,
+            index_version=index_version,
+            reindex=reindex,
+            enable_language_split=True,
+        ), mock_es, mock_loader
+
+    def test_shows_index_uses_podcast_prefix(self):
+        """_run_language_split() must create podcast-shows_v1, not shows_v1."""
+        pipeline, mock_es, mock_loader = self._make_pipeline()
+
+        pipeline._run_language_split()
+
+        created_indices = [call.args[0] for call in mock_es.create_index.call_args_list]
+        assert "podcast-shows_v1" in created_indices
+        assert "shows_v1" not in created_indices
+
+    def test_shows_alias_is_shows(self):
+        """shows alias must point to podcast-shows_v1."""
+        pipeline, mock_es, _ = self._make_pipeline()
+
+        pipeline._run_language_split()
+
+        all_actions = []
+        for call in mock_es.update_aliases.call_args_list:
+            all_actions.extend(call.args[0])
+
+        add_actions = [a["add"] for a in all_actions if "add" in a]
+        shows_adds = [a for a in add_actions if a["alias"] == "shows"]
+        assert len(shows_adds) == 1
+        assert shows_adds[0]["index"] == "podcast-shows_v1"
+
+    def test_shows_mapping_key_is_shows(self):
+        """create_versioned_index for shows must use mapping_key='shows'."""
+        pipeline, _, mock_loader = self._make_pipeline()
+
+        pipeline._run_language_split()
+
+        load_calls = [call.args[0] for call in mock_loader.load.call_args_list]
+        assert "shows" in load_calls
+        assert "podcast-shows" not in load_calls
+
+    def test_episode_indices_created_for_all_languages(self):
+        """_run_language_split() creates podcast-episodes-{lang}_v1 for zh-tw, zh-cn, en."""
+        pipeline, mock_es, _ = self._make_pipeline()
+
+        pipeline._run_language_split()
+
+        created_indices = [call.args[0] for call in mock_es.create_index.call_args_list]
+        assert "podcast-episodes-zh-tw_v1" in created_indices
+        assert "podcast-episodes-zh-cn_v1" in created_indices
+        assert "podcast-episodes-en_v1" in created_indices
