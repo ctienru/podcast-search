@@ -203,7 +203,8 @@ class CreateIndicesPipeline:
             if self.index_version > 1:
                 old_index = f"{base_name}_v{self.index_version - 1}"
                 if not self.es.index_exists(old_index):
-                    old_index = None
+                    # Fall back to alias (may point to an older versioned index)
+                    old_index = alias if self.es.alias_exists(alias) else None
 
             if old_index:
                 self.reindex_if_needed(old_index, new_index)
