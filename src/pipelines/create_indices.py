@@ -43,7 +43,7 @@ class CreateIndicesPipeline:
     # ---------- helpers ----------
 
     def _versioned_index(self, base: str) -> str:
-        return f"{base}_v{self.index_version}"
+        return f"{base}-v{self.index_version}"
 
     def ensure_alias_name_is_free(self, alias: str) -> None:
         """
@@ -176,7 +176,7 @@ class CreateIndicesPipeline:
         old_index = None
         if self.index_version > 1:
             old_version = self.index_version - 1
-            old_index = f"{base_index}_v{old_version}"
+            old_index = f"{base_index}-v{old_version}"
 
         # If old versioned index doesn't exist, try the alias (which might point to an older version)
         if old_index and not self.es.index_exists(old_index):
@@ -199,7 +199,7 @@ class CreateIndicesPipeline:
 
         old_shows: Optional[str] = None
         if self.index_version > 1:
-            old_shows = f"{shows_base}_v{self.index_version - 1}"
+            old_shows = f"{shows_base}-v{self.index_version - 1}"
             if not self.es.index_exists(old_shows):
                 old_shows = shows_alias if self.es.alias_exists(shows_alias) else None
 
@@ -215,7 +215,7 @@ class CreateIndicesPipeline:
 
             old_index: Optional[str] = None
             if self.index_version > 1:
-                old_index = f"{base_name}_v{self.index_version - 1}"
+                old_index = f"{base_name}-v{self.index_version - 1}"
                 if not self.es.index_exists(old_index):
                     # Fall back to alias (may point to an older versioned index)
                     old_index = alias if self.es.alias_exists(alias) else None

@@ -66,7 +66,7 @@ def test_emit_ingest_log_calculates_uncertain_rate(caplog) -> None:
     with caplog.at_level(logging.INFO):
         emit_ingest_log(
             index_counts={"episodes-zh-tw": 8, "episodes-en": 2},
-            language_distribution={"zh-tw": 8, "uncertain": 2},
+            language_distribution={"zh-tw": 8, "unknown": 2},
             ingest_success=10,
             ingest_failed=0,
         )
@@ -79,7 +79,7 @@ def test_emit_ingest_log_warns_when_uncertain_rate_exceeds_threshold(caplog) -> 
     with caplog.at_level(logging.WARNING):
         emit_ingest_log(
             index_counts={"episodes-zh-tw": 9},
-            language_distribution={"zh-tw": 8, "uncertain": 1},
+            language_distribution={"zh-tw": 8, "unknown": 1},
             ingest_success=9,
             ingest_failed=0,
         )
@@ -94,7 +94,7 @@ def test_emit_ingest_log_no_warning_below_threshold(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         emit_ingest_log(
             index_counts={"episodes-zh-tw": 100},
-            language_distribution={"zh-tw": 97, "uncertain": 3},
+            language_distribution={"zh-tw": 97, "unknown": 3},
             ingest_success=100,
             ingest_failed=0,
         )

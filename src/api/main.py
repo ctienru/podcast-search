@@ -29,10 +29,10 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Pre-load model on startup (optional, remove for faster cold start)."""
-    # Uncomment to pre-load model:
-    # from src.api.routes import get_encoder
-    # get_encoder()
+    """Pre-load backend/model on startup (optional, remove for faster cold start)."""
+    # Uncomment to pre-load backend:
+    # from src.api.routes import get_backend
+    # get_backend()
     yield
 
 

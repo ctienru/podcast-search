@@ -625,8 +625,9 @@ def run_incremental(
         updated = list(_storage.get_shows_updated_since(since))
         if not updated:
             logger.info("incremental_no_updates", extra={"since": since})
+            _cursor_aliases = _ALIASES if settings.ENABLE_LANGUAGE_SPLIT else (_LEGACY_ALIAS,)
             save_cursor(
-                {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _ALIASES},
+                {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _cursor_aliases},
                 cursor_path,
             )
             return {"success": 0, "errors": 0, "total": 0}
@@ -646,8 +647,9 @@ def run_incremental(
     )
     stats = pipeline.run()
 
+    _cursor_aliases = _ALIASES if settings.ENABLE_LANGUAGE_SPLIT else (_LEGACY_ALIAS,)
     save_cursor(
-        {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _ALIASES},
+        {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _cursor_aliases},
         cursor_path,
     )
     return stats
@@ -755,13 +757,13 @@ def emit_ingest_log(
 
     Args:
         index_counts:          Document count per ES alias.
-        language_distribution: Count per detected language (incl. "uncertain").
+        language_distribution: Count per detected language (incl. "unknown").
         ingest_success:        Number of documents successfully indexed.
         ingest_failed:         Number of documents that failed to index.
     """
     total = ingest_success + ingest_failed
     uncertain_rate = (
-        language_distribution.get("uncertain", 0) / total if total > 0 else 0.0
+        language_distribution.get("unknown", 0) / total if total > 0 else 0.0
     )
     stats: IngestStats = {
         "event":                 "ingest_complete",

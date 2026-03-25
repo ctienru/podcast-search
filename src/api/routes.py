@@ -11,7 +11,6 @@ from src.api.models import (
 )
 from src.embedding.backend import EmbeddingBackend
 from src.embedding.factory import create_backend
-from src.types import Language
 
 logger = logging.getLogger(__name__)
 

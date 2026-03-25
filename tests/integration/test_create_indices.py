@@ -15,7 +15,7 @@ from src.services.es_service import ElasticsearchService
 
 
 _LANG_INDICES = [
-    f"podcast-episodes-{lang}_v{INDEX_VERSION}"
+    f"podcast-episodes-{lang}-v{INDEX_VERSION}"
     for lang in ("zh-tw", "zh-cn", "en")
 ]
 _LANG_ALIASES = ["episodes-zh-tw", "episodes-zh-cn", "episodes-en"]

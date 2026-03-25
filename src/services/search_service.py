@@ -296,6 +296,7 @@ class SearchService:
         self,
         query: str,
         size: int = 10,
+        language: Language = "zh-tw",
     ) -> SearchResponse:
         """
         Exact phrase match search using match_phrase.
@@ -556,8 +557,8 @@ class SearchService:
             query: Search query text
             mode: Search mode (BM25, KNN, HYBRID, or EXACT)
             size: Number of results to return
-            language: Language of the query, passed to KNN/hybrid embedding.
-                BM25 and EXACT modes ignore this parameter.
+            language: Language of the query. Controls the target index for all
+                modes (BM25, KNN, HYBRID, EXACT) via _get_target_index().
             **kwargs: Additional arguments forwarded to the underlying search method
 
         Returns:
