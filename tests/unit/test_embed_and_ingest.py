@@ -172,6 +172,34 @@ def test_to_es_doc_returns_none_for_unknown_target_index() -> None:
     assert doc is None
 
 
+def test_to_es_doc_returns_none_and_no_warning_when_no_target_index(caplog) -> None:
+    """Episode with no target_index (show excluded by SQLiteStorage._WHERE_BASE) is
+    silently skipped at DEBUG level — not WARNING."""
+    pipeline = _make_pipeline()
+    # Seed episode without target_index; show absent from cache (simulates NULL
+    # target_index show being filtered out by _WHERE_BASE in SQLiteStorage)
+    pipeline._cleaned_episode_cache["ep-noroute"] = {
+        "episode_id": "ep-noroute",
+        "show_id": "show-missing",
+        "cleaned": {"normalized": {"title": "Test", "description": "Desc"}},
+        "original_meta": {
+            "pub_date": None, "duration": None, "audio_url": None,
+            "language": "ja", "image_url": None, "itunes_summary": None,
+            "creator": None, "episode_type": None, "chapters": [],
+        },
+    }
+
+    with patch("src.pipelines.embed_and_ingest.settings") as mock_settings:
+        mock_settings.ENABLE_LANGUAGE_SPLIT = True
+        with caplog.at_level(logging.DEBUG, logger="src.pipelines.embed_and_ingest"):
+            doc = pipeline.to_es_doc(
+                {"episode_id": "ep-noroute", "show_id": "show-missing"}, [0.1] * 384
+            )
+
+    assert doc is None
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+
 def test_to_es_doc_includes_embedding_when_vector_provided() -> None:
     """A non-empty embedding vector must appear in _source['embedding']."""
     pipeline = _make_pipeline()

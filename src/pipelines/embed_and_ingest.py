@@ -345,9 +345,20 @@ class EmbedAndIngestPipeline:
             if not raw_target and show_id:
                 show_data = self._get_show_data(show_id)
                 raw_target = (show_data or {}).get("target_index") or ""
+            if not raw_target:
+                # Show has target_index=NULL in SQLite (unsupported language such as
+                # ja/ko, or not yet classified). SQLiteStorage._WHERE_BASE excludes
+                # these shows from the cache, so this is expected — not an error.
+                logger.debug(
+                    "episode_skipped_no_target_index",
+                    extra={"episode_id": episode_id},
+                )
+                return None
             try:
                 index_alias: str = self.routing_strategy.get_alias(raw_target)
             except ValueError:
+                # target_index has a value but it is not in the routing map —
+                # this is a genuine unexpected state worth investigating.
                 logger.warning(
                     "episode_routing_failed",
                     extra={"episode_id": episode_id, "target_index": raw_target},
