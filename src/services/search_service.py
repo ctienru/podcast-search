@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
+from src.embedding.backend import EmbeddingBackend
+from src.embedding.factory import create_backend
 from src.es.client import get_es_client
 from src.types import Language
 
@@ -99,7 +100,7 @@ class SearchService:
         """Lazy load embedding backend."""
         if self._encoder is None:
             logger.info("loading_encoder_for_search")
-            self._encoder = LocalEmbeddingBackend()
+            self._encoder = create_backend()
         return self._encoder
 
     def _build_bm25_query(

@@ -154,8 +154,13 @@ class APIEmbeddingBackend(EmbeddingBackend):
 
     def __init__(self, api_url: str, api_key: str, timeout: float = 2.0) -> None:
         self._api_url = api_url
-        self._api_key = api_key
-        self._timeout = timeout
+        self._client = httpx.Client(
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        )
+
+    def __del__(self) -> None:
+        self._client.close()
 
     def embed(self, text: str, language: Language) -> list[float]:
         """Call the external API to embed a single text.
@@ -172,17 +177,20 @@ class APIEmbeddingBackend(EmbeddingBackend):
                 or returns a response without an 'embedding' key.
         """
         try:
-            resp = httpx.post(
+            resp = self._client.post(
                 self._api_url,
                 json={"text": text, "language": language},
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                timeout=self._timeout,
             )
             resp.raise_for_status()
             return resp.json()["embedding"]
         except (httpx.HTTPError, KeyError) as exc:
             logger.error("embedding_api_failed", extra={"error": str(exc)})
             raise EmbeddingFallbackError(str(exc)) from exc
+
+    def embed_batch(self, texts: list[str], language: Language) -> list[list[float]]:
+        # TODO: implement true batch request once external API format is confirmed.
+        # OpenAI-compatible: {"input": ["t1", "t2", ...]} → {"data": [{"embedding": [...]}]}
+        return super().embed_batch(texts, language)
 
 
 # ── Query-time LRU cache (works with any backend) ─────────────────────────────

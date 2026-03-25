@@ -6,7 +6,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from src.api.models import EmbedRequest, EmbedResponse, HealthResponse
-from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
+from src.embedding.backend import EmbeddingBackend
+from src.embedding.factory import create_backend
 from src.types import Language
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ def get_backend() -> EmbeddingBackend:
     global _backend
     if _backend is None:
         logger.info("initialising_embedding_backend")
-        _backend = LocalEmbeddingBackend()
+        _backend = create_backend()
         logger.info("embedding_backend_ready")
     return _backend
 

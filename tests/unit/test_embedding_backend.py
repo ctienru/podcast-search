@@ -125,68 +125,83 @@ class TestAPIEmbeddingBackend:
     _KEY = "test-key"
 
     def _make_backend(self) -> APIEmbeddingBackend:
-        return APIEmbeddingBackend(api_url=self._URL, api_key=self._KEY)
+        """Return an APIEmbeddingBackend with a mocked httpx.Client."""
+        with patch("src.embedding.backend.httpx.Client"):
+            return APIEmbeddingBackend(api_url=self._URL, api_key=self._KEY)
 
     def _mock_response(self, body: dict) -> MagicMock:
         resp = MagicMock()
         resp.json.return_value = body
         return resp
 
+    # -- connection pooling --
+
+    def test_has_client_attribute(self) -> None:
+        """APIEmbeddingBackend must create and store an httpx.Client instance."""
+        with patch("src.embedding.backend.httpx.Client") as mock_client_cls:
+            backend = APIEmbeddingBackend(api_url=self._URL, api_key=self._KEY)
+        assert backend._client is mock_client_cls.return_value
+
+    def test_client_initialized_with_bearer_auth_header(self) -> None:
+        """httpx.Client must be created with Authorization: Bearer <key> header."""
+        with patch("src.embedding.backend.httpx.Client") as mock_client_cls:
+            APIEmbeddingBackend(api_url=self._URL, api_key=self._KEY)
+        kwargs = mock_client_cls.call_args.kwargs
+        assert kwargs["headers"]["Authorization"] == f"Bearer {self._KEY}"
+
+    def test_client_initialized_with_configured_timeout(self) -> None:
+        """httpx.Client must be created with the configured timeout."""
+        with patch("src.embedding.backend.httpx.Client") as mock_client_cls:
+            APIEmbeddingBackend(api_url=self._URL, api_key=self._KEY, timeout=5.0)
+        kwargs = mock_client_cls.call_args.kwargs
+        assert kwargs["timeout"] == 5.0
+
+    def test_embed_uses_client_post(self) -> None:
+        """embed() must call self._client.post, not httpx.post directly."""
+        backend = self._make_backend()
+        backend._client.post.return_value = self._mock_response({"embedding": [0.1]})
+        backend.embed("text", "en")
+        backend._client.post.assert_called_once()
+
+    # -- functional correctness --
+
     def test_returns_embedding_on_success(self) -> None:
         """A 200 response with 'embedding' key must return the vector."""
         backend = self._make_backend()
         expected = [0.1, 0.2, 0.3]
-        with patch("httpx.post", return_value=self._mock_response({"embedding": expected})):
-            result = backend.embed("search query", "zh-tw")
+        backend._client.post.return_value = self._mock_response({"embedding": expected})
+        result = backend.embed("search query", "zh-tw")
         assert result == expected
 
     def test_sends_text_and_language_in_body(self) -> None:
         """POST body must include both 'text' and 'language' fields."""
         backend = self._make_backend()
-        with patch("httpx.post", return_value=self._mock_response({"embedding": [0.1]})) as mock_post:
-            backend.embed("query text", "zh-cn")
-
-        body = mock_post.call_args.kwargs["json"]
+        backend._client.post.return_value = self._mock_response({"embedding": [0.1]})
+        backend.embed("query text", "zh-cn")
+        body = backend._client.post.call_args.kwargs["json"]
         assert body["text"] == "query text"
         assert body["language"] == "zh-cn"
-
-    def test_sends_bearer_auth_header(self) -> None:
-        """Authorization header must use Bearer scheme with the configured key."""
-        backend = self._make_backend()
-        with patch("httpx.post", return_value=self._mock_response({"embedding": [0.1]})) as mock_post:
-            backend.embed("text", "en")
-
-        headers = mock_post.call_args.kwargs["headers"]
-        assert headers["Authorization"] == f"Bearer {self._KEY}"
 
     def test_raises_fallback_error_on_http_error(self) -> None:
         """httpx.HTTPError must be wrapped in EmbeddingFallbackError."""
         backend = self._make_backend()
-        with patch("httpx.post", side_effect=httpx.HTTPError("connection refused")):
-            with pytest.raises(EmbeddingFallbackError):
-                backend.embed("test", "en")
+        backend._client.post.side_effect = httpx.HTTPError("connection refused")
+        with pytest.raises(EmbeddingFallbackError):
+            backend.embed("test", "en")
 
     def test_raises_fallback_error_on_timeout(self) -> None:
         """httpx.TimeoutException must be wrapped in EmbeddingFallbackError."""
         backend = self._make_backend()
-        with patch("httpx.post", side_effect=httpx.TimeoutException("timed out")):
-            with pytest.raises(EmbeddingFallbackError):
-                backend.embed("test", "en")
+        backend._client.post.side_effect = httpx.TimeoutException("timed out")
+        with pytest.raises(EmbeddingFallbackError):
+            backend.embed("test", "en")
 
     def test_raises_fallback_error_when_embedding_key_missing(self) -> None:
         """Missing 'embedding' key in response must raise EmbeddingFallbackError."""
         backend = self._make_backend()
-        with patch("httpx.post", return_value=self._mock_response({"result": "ok"})):
-            with pytest.raises(EmbeddingFallbackError):
-                backend.embed("test", "en")
-
-    def test_uses_configured_timeout(self) -> None:
-        """Configured timeout must be passed to httpx.post."""
-        backend = APIEmbeddingBackend(api_url=self._URL, api_key=self._KEY, timeout=5.0)
-        with patch("httpx.post", return_value=self._mock_response({"embedding": [0.1]})) as mock_post:
-            backend.embed("text", "en")
-
-        assert mock_post.call_args.kwargs["timeout"] == 5.0
+        backend._client.post.return_value = self._mock_response({"result": "ok"})
+        with pytest.raises(EmbeddingFallbackError):
+            backend.embed("test", "en")
 
 
 # ── embed_query_cached ────────────────────────────────────────────────────────
