@@ -174,13 +174,13 @@ GET shows/_count
 
 ### Daily incremental sync (default)
 
-Only processes shows updated since the last run. Uses cursor in `data/ingest_cursor.json`.
+`embed_and_ingest.py` 會依 `data/ingest_cursor.json` 做增量；`ingest_shows.py` 目前仍為全量同步（尚未 cursor 化）。
 
 ```bash
 python -m src.pipelines.ingest_shows
 python -m src.pipelines.clean_episodes
 python -m src.pipelines.embed_and_ingest
-# SYNC_MODE defaults to "incremental"
+# SYNC_MODE defaults to "incremental" (for embed_and_ingest)
 ```
 
 ### Backfill a newly added non-analyzer field
@@ -327,9 +327,9 @@ Episode document:
 |----------|---------|-------|
 | Index-time (zh-tw, zh-cn) | `LocalEmbeddingBackend` | `BAAI/bge-base-zh-v1.5` (768 dim) |
 | Index-time (en) | `LocalEmbeddingBackend` | `paraphrase-multilingual-MiniLM-L12-v2` (384 dim) |
-| Query-time | `POST /embed` → `LocalEmbeddingBackend` | Same as index-time per language |
+| Query-time | `/embed` 由 `EMBEDDING_STRATEGY` 決定（`local` 或 `api`） | 與 backend 選擇一致 |
 
-**Fallback:** If `EMBEDDING_API_URL` is set, `APIEmbeddingBackend` is used at query-time instead (Phase 3-B, triggered if LRU cache hit rate < 60%).
+`create_backend()` 目前以 `EMBEDDING_STRATEGY` 環境變數決定使用 `LocalEmbeddingBackend` 或 `APIEmbeddingBackend`；沒有依 LRU hit rate 自動切換 backend 的機制。
 
 ## Search Evaluation
 
@@ -349,9 +349,7 @@ python scripts/check_regression_gate.py
 
 ### Offline Regression Gate
 
-The PR gate (`.github/workflows/pr-gate.yml`) runs unit tests and the NDCG regression gate on every PR. Merge is blocked if:
-- Any unit test fails
-- Overall NDCG@10 drops below baseline (zh ≥ 0.897, en ≥ 0.853)
+目前 `pr-gate.yml` 會在 PR 執行 unit/pipeline tests。NDCG regression gate 仍可透過 `scripts/check_regression_gate.py` 手動或在其他 CI job 執行。
 
 ### Online Behavioral Metrics
 
