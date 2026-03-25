@@ -122,6 +122,7 @@ def _make_pipeline() -> EmbedAndIngestPipeline:
         es_service=MagicMock(),
         embedding_backend=MagicMock(spec=EmbeddingBackend),
         routing_strategy=LanguageSplitRoutingStrategy(),
+        storage=MagicMock(),
     )
 
 
@@ -284,6 +285,7 @@ class TestBatchEncode:
             es_service=MagicMock(),
             embedding_backend=mock_backend,
             routing_strategy=LanguageSplitRoutingStrategy(),
+            storage=MagicMock(),
         )
         _seed_episode(pipeline, "ep-tw-1", "podcast-episodes-zh-tw")
         _seed_episode(pipeline, "ep-tw-2", "podcast-episodes-zh-tw")
@@ -316,6 +318,7 @@ class TestBatchEncode:
             es_service=MagicMock(),
             embedding_backend=mock_backend,
             routing_strategy=LanguageSplitRoutingStrategy(),
+            storage=MagicMock(),
         )
         _seed_episode(pipeline, "ep-zh", "podcast-episodes-zh-tw")
         _seed_episode(pipeline, "ep-en", "podcast-episodes-en")
@@ -340,6 +343,7 @@ class TestBatchEncode:
             es_service=MagicMock(),
             embedding_backend=None,
             routing_strategy=LanguageSplitRoutingStrategy(),
+            storage=MagicMock(),
         )
         inputs = [_make_embedding_input("ep-x", "show-1", "some text")]
         results = pipeline.batch_encode(inputs)
