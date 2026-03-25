@@ -25,3 +25,25 @@ class HealthResponse(BaseModel):
     status: str
     model: str
     dimensions: int
+
+
+# ── OpenAI-compatible /v1/embeddings ─────────────────────────────────────────
+
+class OpenAIEmbedRequest(BaseModel):
+    """OpenAI-compatible embedding request."""
+    model: str = Field(..., description="Model identifier. Must be a supported model.")
+    input: str | list[str] = Field(..., description="Text or list of texts to embed.")
+
+
+class OpenAIEmbeddingObject(BaseModel):
+    """Single embedding object in the response data array."""
+    object: str = Field("embedding", description="Always 'embedding'.")
+    index: int = Field(..., description="0-based position matching the input array.")
+    embedding: list[float] = Field(..., description="Dense float vector.")
+
+
+class OpenAIEmbedResponse(BaseModel):
+    """OpenAI-compatible embedding response."""
+    object: str = Field("list", description="Always 'list'.")
+    data: list[OpenAIEmbeddingObject]
+    model: str = Field(..., description="Model name echoed from the request.")

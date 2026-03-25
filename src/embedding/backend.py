@@ -11,6 +11,7 @@ quality.
 from __future__ import annotations
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from functools import lru_cache
 
@@ -140,20 +141,37 @@ class EmbeddingFallbackError(Exception):
 
 
 class APIEmbeddingBackend(EmbeddingBackend):
-    """Calls an external embedding API for query-time embedding.
+    """Calls an OpenAI-compatible external embedding API for query-time embedding.
 
     Suitable for query-time use — removes the need for a resident model in the
     VM. Caller must handle EmbeddingFallbackError and degrade to BM25-only
     search when the API is unavailable.
 
+    embed() retries up to 3 times with exponential backoff on transient errors
+    (5xx, network errors). 401/403 and timeouts fail immediately.
+
+    embed_batch() is fail-fast — no retry, because retrying a large batch is
+    too expensive. Language consistency across texts is the caller's responsibility
+    (batch_encode() in the ingest pipeline groups by language before calling this).
+
     Args:
-        api_url: External embedding endpoint URL.
-        api_key: API authentication key (sent as Bearer token).
-        timeout: Request timeout in seconds (default 2.0).
+        api_url:  External embedding endpoint URL (must accept POST /v1/embeddings).
+        api_key:  API authentication key (sent as Bearer token).
+        model_zh: Model name for Chinese text (zh-tw / zh-cn).
+        model_en: Model name for English text.
+        timeout:  Request timeout in seconds (default 2.0).
     """
 
-    def __init__(self, api_url: str, api_key: str, timeout: float = 2.0) -> None:
+    def __init__(
+        self,
+        api_url: str,
+        api_key: str,
+        model_zh: str,
+        model_en: str,
+        timeout: float = 2.0,
+    ) -> None:
         self._api_url = api_url
+        self._model_map = {"zh": model_zh, "en": model_en}
         self._client = httpx.Client(
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout,
@@ -162,35 +180,76 @@ class APIEmbeddingBackend(EmbeddingBackend):
     def __del__(self) -> None:
         self._client.close()
 
+    @staticmethod
+    def _model_key(language: Language) -> str:
+        return "zh" if language in ("zh-tw", "zh-cn") else "en"
+
     def embed(self, text: str, language: Language) -> list[float]:
-        """Call the external API to embed a single text.
+        """Call the external API to embed a single text, with retry.
+
+        Retries up to 3 times on transient failures (5xx, network errors).
+        Fails immediately on 401/403 or timeout.
 
         Args:
             text:     Text to encode.
-            language: Passed to the API so it can select the right model.
+            language: Controls model selection (zh-tw/zh-cn → model_zh, en → model_en).
 
         Returns:
             Embedding vector from the API response.
 
         Raises:
-            EmbeddingFallbackError: When the API is unreachable, times out,
-                or returns a response without an 'embedding' key.
+            EmbeddingFallbackError: On auth failure, timeout, or exhausted retries.
         """
-        try:
-            resp = self._client.post(
-                self._api_url,
-                json={"text": text, "language": language},
-            )
-            resp.raise_for_status()
-            return resp.json()["embedding"]
-        except (httpx.HTTPError, KeyError) as exc:
-            logger.error("embedding_api_failed", extra={"error": str(exc)})
-            raise EmbeddingFallbackError(str(exc)) from exc
+        model = self._model_map[self._model_key(language)]
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = self._client.post(self._api_url, json={"model": model, "input": text})
+                if resp.status_code in (401, 403):
+                    raise EmbeddingFallbackError(f"Auth failed: HTTP {resp.status_code}")
+                if resp.status_code != 200:
+                    raise httpx.HTTPStatusError(
+                        f"HTTP {resp.status_code}", request=resp.request, response=resp
+                    )
+                data = sorted(resp.json()["data"], key=lambda x: x["index"])
+                return data[0]["embedding"]
+            except EmbeddingFallbackError:
+                raise
+            except httpx.TimeoutException as exc:
+                raise EmbeddingFallbackError("Timeout") from exc
+            except (httpx.HTTPError, KeyError, IndexError) as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.5 * 2 ** attempt)
+        raise EmbeddingFallbackError(f"Failed after 3 attempts: {last_exc}") from last_exc
 
     def embed_batch(self, texts: list[str], language: Language) -> list[list[float]]:
-        # TODO: implement true batch request once external API format is confirmed.
-        # OpenAI-compatible: {"input": ["t1", "t2", ...]} → {"data": [{"embedding": [...]}]}
-        return super().embed_batch(texts, language)
+        """Call the external API to embed a batch of texts (fail-fast, no retry).
+
+        Args:
+            texts:    Texts to encode. Must all share the same language.
+            language: Controls model selection.
+
+        Returns:
+            List of embedding vectors sorted by index, in the same order as texts.
+
+        Raises:
+            EmbeddingFallbackError: On any error (auth failure, timeout, HTTP error).
+        """
+        model = self._model_map[self._model_key(language)]
+        try:
+            resp = self._client.post(self._api_url, json={"model": model, "input": texts})
+            if resp.status_code in (401, 403):
+                raise EmbeddingFallbackError(f"Auth failed: HTTP {resp.status_code}")
+            resp.raise_for_status()
+            data = sorted(resp.json()["data"], key=lambda x: x["index"])
+            return [item["embedding"] for item in data]
+        except EmbeddingFallbackError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise EmbeddingFallbackError("Batch timeout") from exc
+        except (httpx.HTTPError, KeyError) as exc:
+            raise EmbeddingFallbackError(f"Batch failed: {exc}") from exc
 
 
 # ── Query-time LRU cache (works with any backend) ─────────────────────────────

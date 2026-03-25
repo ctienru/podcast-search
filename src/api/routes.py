@@ -5,7 +5,10 @@ API Routes
 import logging
 from fastapi import APIRouter, HTTPException
 
-from src.api.models import EmbedRequest, EmbedResponse, HealthResponse
+from src.api.models import (
+    EmbedRequest, EmbedResponse, HealthResponse,
+    OpenAIEmbedRequest, OpenAIEmbedResponse, OpenAIEmbeddingObject,
+)
 from src.embedding.backend import EmbeddingBackend
 from src.embedding.factory import create_backend
 from src.types import Language
@@ -27,6 +30,13 @@ _LANGUAGE_TO_DIM: dict[str, int] = {
     "zh-tw": 768,
     "zh-cn": 768,
     "en":    384,
+}
+
+# Reverse map for /v1/embeddings: model name → canonical language for embed_batch()
+# Unknown model names are rejected with 422 (no silent fallback).
+_MODEL_TO_LANG: dict[str, str] = {
+    "BAAI/bge-base-zh-v1.5":                 "zh-tw",
+    "paraphrase-multilingual-MiniLM-L12-v2": "en",
 }
 
 
@@ -74,4 +84,31 @@ def embed(req: EmbedRequest):
         )
     except Exception as e:
         logger.exception("embedding_failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/v1/embeddings", response_model=OpenAIEmbedResponse)
+def openai_embed(req: OpenAIEmbedRequest):
+    """OpenAI-compatible embedding endpoint.
+
+    Accepts a model name and one or more texts. The model name controls which
+    language-specific model is used; unknown models are rejected with 422.
+
+    Java backend and eval scripts can point EMBEDDING_API_URL at this endpoint
+    to use the local model without changing any client code.
+    """
+    language = _MODEL_TO_LANG.get(req.model)
+    if language is None:
+        raise HTTPException(status_code=422, detail=f"Unsupported model: {req.model}")
+
+    texts = [req.input] if isinstance(req.input, str) else req.input
+    try:
+        backend = get_backend()
+        embeddings = backend.embed_batch(texts, language)
+        return OpenAIEmbedResponse(
+            data=[OpenAIEmbeddingObject(index=i, embedding=e) for i, e in enumerate(embeddings)],
+            model=req.model,
+        )
+    except Exception as e:
+        logger.exception("openai_embedding_failed")
         raise HTTPException(status_code=500, detail=str(e))

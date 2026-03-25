@@ -16,6 +16,8 @@ def create_backend() -> EmbeddingBackend:
         return APIEmbeddingBackend(
             api_url=os.environ["EMBEDDING_API_URL"],
             api_key=os.environ["EMBEDDING_API_KEY"],
+            model_zh=os.getenv("EMBEDDING_MODEL_ZH", "BAAI/bge-base-zh-v1.5"),
+            model_en=os.getenv("EMBEDDING_MODEL_EN", "paraphrase-multilingual-MiniLM-L12-v2"),
             timeout=float(os.getenv("EMBEDDING_TIMEOUT_MS", "2000")) / 1000,
         )
     return LocalEmbeddingBackend()
