@@ -91,13 +91,21 @@ podcast-search/
 │   ├── episodes-zh-cn.json      # Simplified Chinese index (IK analyzer)
 │   ├── episodes-en.json         # English index (standard analyzer)
 │   └── shows.json               # Shows index
+├── evaluation/
+│   └── ndcg_mrr_baseline.json       # Committed NDCG baseline for PR gate
 ├── scripts/
-│   ├── migrate_reindex.py       # Phase 2: data migration to 3-index layout
-│   ├── compute_online_metrics.py
-│   ├── check_regression_gate.py
-│   ├── compare_search_methods.py
-│   ├── evaluate_ndcg_mrr.py
-│   └── build_annotation_pool.py
+│   ├── migrate_reindex.py               # Phase 2: data migration to 3-index layout
+│   ├── evaluate_ndcg_mrr.py             # Offline Quality: NDCG@10 + MRR per language/method
+│   ├── check_regression_gate.py         # Offline Quality: pass/fail check against NDCG thresholds
+│   ├── evaluate_language_detection.py   # Correctness: language routing accuracy (RSS tag → index)
+│   ├── index_health_report.py           # Correctness: embedding coverage, zero-result rate
+│   ├── benchmark_latency.py             # Offline Quality: P50/P95/P99 latency per language/mode
+│   ├── run_evaluation_suite.py          # Run Correctness + Offline Quality checks in sequence
+│   ├── generate_weekly_report.py        # Weekly report (Offline Quality + Online Behavior)
+│   ├── compute_online_metrics.py        # Online Behavior: SSR, same-language click rate, reformulation rate
+│   ├── compare_search_methods.py        # BM25 vs kNN vs Hybrid overlap/rank comparison
+│   ├── build_annotation_pool.py
+│   └── annotate_with_cross_encoder.py
 ├── tests/
 │   ├── unit/                    # Unit tests (PR gate)
 │   ├── integration/             # Integration tests (require real ES)
@@ -333,33 +341,77 @@ Episode document:
 
 ## Search Evaluation
 
+Evaluation is structured as three check groups. See `podcast-doc/v2/2026-03-25-search-evaluation-v2.md` for full framework details.
+
+### Correctness (run before deploy)
+
+Data quality checks — are the indices healthy and is routing correct?
+
 ```bash
-# No-annotation evaluation (Extraneous, Stability, Dominance)
-python -m src.pipelines.evaluate_search
+# Index health: embedding coverage ≥ 99%, zero-result rate < 5%
+python scripts/index_health_report.py --output data/evaluation/index_health.json
 
-# NDCG/MRR comparison
-python scripts/evaluate_ndcg_mrr.py
-
-# BM25 vs kNN vs Hybrid comparison
-python scripts/compare_search_methods.py
-
-# Check regression gate (exits non-zero if NDCG drops > 5%)
-python scripts/check_regression_gate.py
+# Language routing accuracy: ≥ 95% precision, ≥ 90% recall
+# Requires labeled sample at data/evaluation/language_detection_sample.json
+python scripts/evaluate_language_detection.py
 ```
 
-### Offline Regression Gate
+**Current status**: Index health PASS. Language routing FAIL — 3 shows have wrong RSS `<language>` tags routed to `en` index; fix is in the crawler/ingest layer.
 
-目前 `pr-gate.yml` 會在 PR 執行 unit/pipeline tests。NDCG regression gate 仍可透過 `scripts/check_regression_gate.py` 手動或在其他 CI job 執行。
+### Offline Quality (run before deploy and on PR)
 
-### Online Behavioral Metrics
+Search quality checks — does ranking meet regression thresholds?
 
-Query logs (`logs/query_log.jsonl`) and click logs (`logs/click_log.jsonl`) are written at runtime by `QueryLogger` and `ClickTracker`. Compute metrics:
+```bash
+# Run the full suite (Correctness + Offline Quality, ~4 min, requires local ES)
+python scripts/run_evaluation_suite.py
+# Output: data/evaluation/reports/{date}/suite_report.json
+
+# Run only the NDCG evaluation
+python scripts/evaluate_ndcg_mrr.py \
+    --output data/evaluation/reports/$(date +%Y-%m-%d)/ndcg_mrr_report.json
+
+# Check regression against thresholds: zh-tw ≥ 0.897 | zh-cn ≥ 0.897 (provisional) | en ≥ 0.853
+python scripts/check_regression_gate.py --report evaluation/ndcg_mrr_baseline.json
+
+# Latency baseline (full, 20 runs — use to rebuild baseline)
+python scripts/benchmark_latency.py --runs 20 --output data/benchmark/latency_baseline.json
+
+# Latency quick check (5 runs — used by suite)
+python scripts/benchmark_latency.py --quick
+```
+
+**PR Gate**: `pr-gate.yml` runs `check_regression_gate.py` against `evaluation/ndcg_mrr_baseline.json` in warning mode (`continue-on-error: true`). To update the baseline after a suite run:
+
+```bash
+cp data/evaluation/reports/$(date +%Y-%m-%d)/ndcg_mrr_report.json evaluation/ndcg_mrr_baseline.json
+# then commit evaluation/ndcg_mrr_baseline.json
+```
+
+### Online Behavior (weekly, post-launch)
+
+Behavioral metrics from real user traffic.
 
 ```bash
 python scripts/compute_online_metrics.py \
   --query-log logs/query_log.jsonl \
   --click-log logs/click_log.jsonl
 ```
+
+Thresholds: Search Success Rate ≥ 60%, Same-Language Click Rate ≥ 80%, Reformulation Rate ≤ 20%.
+
+### Weekly Report
+
+```bash
+python scripts/generate_weekly_report.py \
+    --date $(date +%Y-%m-%d) \
+    --prev-date YYYY-MM-DD \
+    --query-log logs/query_log.jsonl \
+    --click-log logs/click_log.jsonl \
+    --output reports/weekly_$(date +%Y-%m-%d).md
+```
+
+Produces a Markdown report combining Offline Quality method comparison, per-query NDCG delta vs previous run, and Online Behavior metrics.
 
 ## Testing
 
