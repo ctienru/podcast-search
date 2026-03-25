@@ -6,10 +6,6 @@
           "type": "edge_ngram",
           "min_gram": 2,
           "max_gram": 20
-        },
-        "t2s_convert": {
-          "type": "stconvert",
-          "convert_type": "t2s"
         }
       },
       "analyzer": {
@@ -30,17 +26,11 @@
         },
         "ik_index_analyzer": {
           "type": "custom",
-          "tokenizer": "ik_max_word",
-          "filter": [
-            "t2s_convert"
-          ]
+          "tokenizer": "ik_max_word"
         },
         "ik_search_analyzer": {
           "type": "custom",
-          "tokenizer": "ik_smart",
-          "filter": [
-            "t2s_convert"
-          ]
+          "tokenizer": "ik_smart"
         }
       }
     }
