@@ -1,94 +1,121 @@
 # podcast-search
 
-Search indexing service that syncs podcast data from crawler output to Elasticsearch for search queries.
+Search indexing service that syncs podcast data from the crawler's SQLite database and RSS feeds into Elasticsearch for multi-language episode search.
 
 ## Architecture Overview
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│ podcast-crawler │────▶│  Local Storage  │────▶│ podcast-search  │
-│  (RSS Fetcher)  │     │  (Raw + Shows)  │     │  (Parse+Index)  │
-└─────────────────┘     └─────────────────┘     └────────┬────────┘
-                                                        │
-                                                        ▼
-                                              ┌─────────────────┐
-                                              │  Elasticsearch  │
-                                              │ (Search Engine) │
-                                              └─────────────────┘
+┌─────────────────┐     ┌──────────────────────┐
+│ podcast-crawler │────▶│  SQLite (crawler.db)  │
+│  (RSS Fetcher)  │     │  + raw/rss/*.xml       │
+└─────────────────┘     └──────────┬───────────┘
+                                   │
+                          ┌────────▼────────┐
+                          │ podcast-search  │
+                          │ (Parse + Index) │
+                          └────────┬────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+             episodes-zh-tw  episodes-zh-cn  episodes-en
+                    └──────────────┴──────────────┘
+                               Elasticsearch
 ```
 
 ### Data Flow
 
 ```
-podcast-crawler                    podcast-search
-     │                                  │
-     ├── raw/rss/*.xml ───────────────▶ clean_episodes.py ──────▶ cleaned/episodes/*.json
-     │                                  │                                │
-     │                                  │                                ▼
-     │                                  │                        build_embedding_input.py
-     │                                  │                                │
-     │                                  │                                ▼
-     │                                  │                        embedding_input/episodes/*.json
-     │                                  │                                │
-     │                                  │                                ▼
-     │                                  │                        embed_and_ingest.py ──▶ ES episodes
-     │                                  │
-     └── normalized/shows/*.json ─────▶ ingest_shows.py ────────────────▶ ES shows
+podcast-crawler
+     │
+     ├── SQLite (shows: language, target_index)
+     │        │
+     │        └─────▶ ingest_shows.py ──────────────▶ ES shows
+     │
+     └── raw/rss/*.xml
+              │
+              └─────▶ clean_episodes.py ─▶ data/cleaned/episodes/
+                             │
+                             └─▶ embed_and_ingest.py ─▶ ES episodes-{lang}
+                                  (embed + route by language)
 ```
-
-## Features
-
-- **Hybrid Search**: BM25 + kNN with RRF (Reciprocal Rank Fusion)
-- **Data Cleaning**: RSS parsing, boilerplate removal, multilingual support
-- **Embedding Pipeline**: Sentence Transformers for semantic search
-- **Search Evaluation**: No-annotation metrics for quality assessment
-- **Versioned Indexing**: Zero-downtime schema upgrades via alias switching
 
 ## Project Structure
 
 ```
 podcast-search/
 ├── src/
-│   ├── config/          # Configuration
-│   │   └── settings.py  # Environment variables
-│   ├── storage/         # Data access layer
-│   │   ├── base.py      # Abstract interface
-│   │   └── local.py     # Local filesystem
-│   ├── es/              # Elasticsearch utilities
-│   │   ├── client.py    # ES connection
+│   ├── config/
+│   │   └── settings.py          # Environment variables
+│   ├── types.py                 # Shared type definitions (Language, Show, Episode, ...)
+│   ├── storage/                 # Data access layer (Repository pattern)
+│   │   ├── base.py              # StorageBase ABC
+│   │   ├── sqlite.py            # SQLiteStorage (v2 primary source)
+│   │   ├── local.py             # LocalStorage (dev fallback)
+│   │   └── factory.py           # StorageFactory
+│   ├── search/
+│   │   └── routing.py           # IndexRoutingStrategy (Strategy pattern)
+│   ├── es/                      # Elasticsearch utilities
+│   │   ├── client.py
+│   │   ├── index_creator.py
 │   │   └── mapping_loader.py
-│   ├── services/        # Service layer
-│   │   ├── es_service.py          # ES operations
-│   │   └── search_service.py      # BM25/kNN/Hybrid search
-│   ├── pipelines/       # ETL Pipelines
-│   │   ├── create_indices.py      # Index creation
-│   │   ├── ingest_shows.py        # Shows ingestion
-│   │   ├── ingest_episodes.py     # Episodes ingestion
-│   │   ├── clean_episodes.py      # RSS → Cleaned JSON
-│   │   ├── build_embedding_input.py  # Cleaned → Embedding input
-│   │   ├── embed_and_ingest.py    # Embedding + ES ingest
-│   │   └── evaluate_search.py     # Search evaluation
-│   ├── cleaning/        # Text cleaning
-│   │   ├── rss_parser.py          # RSS XML parser
-│   │   └── text_cleaner.py        # Boilerplate removal
-│   ├── embedding/       # Embedding generation
-│   │   ├── encoder.py             # Sentence Transformer
-│   │   └── input_builder.py       # Title-weighted text
-│   ├── evaluation/      # Search evaluation
-│   │   ├── extraneous_scorer.py   # Extraneous content detection
-│   │   └── metrics.py             # No-annotation metrics
-│   ├── api/             # FastAPI endpoints
+│   ├── services/
+│   │   ├── es_service.py        # ES bulk operations
+│   │   └── search_service.py    # BM25/kNN/Hybrid search (evaluation use)
+│   ├── pipelines/               # ETL pipelines
+│   │   ├── create_indices.py    # Create 3 language indices + aliases
+│   │   ├── ingest_shows.py      # Shows: SQLite → ES shows index
+│   │   ├── clean_episodes.py    # RSS XML → cleaned JSON
+│   │   ├── embed_and_ingest.py  # Cleaned JSON → embedding → ES episodes
+│   │   └── evaluate_search.py   # Search quality evaluation pipeline
+│   ├── embedding/
+│   │   └── backend.py           # EmbeddingBackend ABC, LocalEmbeddingBackend, APIEmbeddingBackend
+│   ├── cleaning/
+│   │   ├── rss_parser.py        # RSS XML parser
+│   │   └── text_cleaner.py      # Boilerplate removal
+│   ├── evaluation/              # Search quality metrics
+│   │   ├── query_logger.py      # QueryLogger (Middleware pattern)
+│   │   ├── click_tracker.py     # ClickTracker (Middleware pattern)
+│   │   ├── metrics.py           # No-annotation metrics
+│   │   ├── ranking_metrics.py   # NDCG, MRR
+│   │   ├── cross_encoder_judge.py
+│   │   └── extraneous_scorer.py
+│   ├── api/                     # FastAPI endpoints
 │   │   ├── main.py
 │   │   ├── models.py
-│   │   └── routes.py
+│   │   └── routes.py            # GET /health, POST /embed
 │   └── utils/
-│       └── logging.py   # JSON structured logging
-├── mappings/            # ES index definitions
-│   ├── shows.json
-│   └── episodes.json
-├── tests/               # Unit tests
-├── docker/              # Local dev environment
-│   └── docker-compose.yml
+│       ├── logging.py           # JSON structured logging
+│       └── parsers.py           # RSS metadata parsing utilities
+├── mappings/
+│   ├── episodes-zh-tw.json      # Traditional Chinese index (IK analyzer)
+│   ├── episodes-zh-cn.json      # Simplified Chinese index (IK analyzer)
+│   ├── episodes-en.json         # English index (standard analyzer)
+│   └── shows.json               # Shows index
+├── evaluation/
+│   └── ndcg_mrr_baseline.json       # Committed NDCG baseline for PR gate
+├── scripts/
+│   ├── migrate_reindex.py               # Phase 2: data migration to 3-index layout
+│   ├── evaluate_ndcg_mrr.py             # Offline Quality: NDCG@10 + MRR per language/method
+│   ├── check_regression_gate.py         # Offline Quality: pass/fail check against NDCG thresholds
+│   ├── evaluate_language_detection.py   # Correctness: language routing accuracy (RSS tag → index)
+│   ├── index_health_report.py           # Correctness: embedding coverage, zero-result rate
+│   ├── benchmark_latency.py             # Offline Quality: P50/P95/P99 latency per language/mode
+│   ├── run_evaluation_suite.py          # Run Correctness + Offline Quality checks in sequence
+│   ├── generate_weekly_report.py        # Weekly report (Offline Quality + Online Behavior)
+│   ├── compute_online_metrics.py        # Online Behavior: SSR, same-language click rate, reformulation rate
+│   ├── compare_search_methods.py        # BM25 vs kNN vs Hybrid overlap/rank comparison
+│   ├── build_annotation_pool.py
+│   └── annotate_with_cross_encoder.py
+├── tests/
+│   ├── unit/                    # Unit tests (PR gate)
+│   ├── integration/             # Integration tests (require real ES)
+│   ├── cleaning/
+│   ├── evaluation/
+│   ├── pipelines/
+│   ├── services/
+│   └── storage/
+├── docker/
+│   └── docker-compose.yml       # Local Elasticsearch + Kibana
 └── requirements.txt
 ```
 
@@ -97,11 +124,8 @@ podcast-search/
 ### 1. Environment Setup
 
 ```bash
-# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 pip install -r requirements-dev.txt  # For development
 ```
@@ -112,365 +136,298 @@ pip install -r requirements-dev.txt  # For development
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-Services available at:
+Services:
 - Elasticsearch: http://localhost:9200
 - Kibana: http://localhost:5601/app/dev_tools#/console
 
-### 3. Prepare Data
-
-Place crawler's output in the `data/` directory:
+### 3. Data Sources
 
 ```
 data/
-├── normalized/
-│   └── shows/
-│       └── show:apple:123.json
-└── (raw RSS from crawler at ../podcast-crawler/data/raw/rss/)
+└── crawler.db                        # SQLite from podcast-crawler v2
+../podcast-crawler/data/raw/rss/      # RSS XML files (shared with crawler)
 ```
 
-### 4. Run Pipelines
+### 4. Full Re-index (fresh ES)
+
+Use this when starting from a clean ES instance or after a mapping change.
 
 ```bash
-# Create indices
+# Step 1 — Create 3 language indices + aliases (one-time)
 python -m src.pipelines.create_indices
 
-# Ingest shows
+# Step 2 — Ingest shows from SQLite
 python -m src.pipelines.ingest_shows
 
-# Clean episodes (raw RSS → cleaned JSON)
+# Step 3 — Clean episodes: RSS XML → data/cleaned/episodes/
 python -m src.pipelines.clean_episodes
 
-# Build embedding input (cleaned → embedding format)
-python -m src.pipelines.build_embedding_input
-
-# Generate embeddings and ingest to ES
-python -m src.pipelines.embed_and_ingest --batch-size 64
+# Step 4 — Embed and ingest all episodes (full mode, re-embeds everything)
+SYNC_MODE=full python -m src.pipelines.embed_and_ingest
 ```
 
-**Full Reindex (one-liner)**:
-
-```bash
-python -m src.pipelines.create_indices && \
-python -m src.pipelines.ingest_shows && \
-python -m src.pipelines.clean_episodes && \
-python -m src.pipelines.build_embedding_input && \
-python -m src.pipelines.embed_and_ingest --batch-size 64
-```
-
-### 5. Run Evaluation
-
-After indexing, run evaluation to validate search quality:
-
-```bash
-# No-Annotation evaluation (Extraneous, Stability, Dominance)
-python -m src.pipelines.evaluate_search
-
-# BM25 vs kNN vs Hybrid comparison (Jaccard analysis)
-python scripts/compare_search_methods.py --output data/evaluation/method_comparison.json
-```
-
-**Full Reindex + Evaluate**:
-
-```bash
-python -m src.pipelines.create_indices && \
-python -m src.pipelines.ingest_shows && \
-python -m src.pipelines.clean_episodes && \
-python -m src.pipelines.build_embedding_input && \
-python -m src.pipelines.embed_and_ingest --batch-size 64 && \
-python -m src.pipelines.evaluate_search && \
-python scripts/compare_search_methods.py --output data/evaluation/method_comparison.json
-```
-
-### 6. Verify Results
-
-In Kibana Dev Tools:
+### 5. Verify
 
 ```
+GET _aliases
+GET episodes-zh-tw/_count
+GET episodes-zh-cn/_count
+GET episodes-en/_count
 GET shows/_count
-GET episodes/_count
+```
 
-GET shows/_search
-{
-  "query": { "match": { "title": "daily" } }
-}
+---
+
+## Run Scenarios
+
+### Daily incremental sync (default)
+
+`embed_and_ingest.py` 會依 `data/ingest_cursor.json` 做增量；`ingest_shows.py` 目前仍為全量同步（尚未 cursor 化）。
+
+```bash
+python -m src.pipelines.ingest_shows
+python -m src.pipelines.clean_episodes
+python -m src.pipelines.embed_and_ingest
+# SYNC_MODE defaults to "incremental" (for embed_and_ingest)
+```
+
+### Backfill a newly added non-analyzer field
+
+Use after adding a new field to the mapping that doesn't require re-tokenization (e.g. `image_url`, `episode_count`). Re-ingests all docs but **skips re-embedding** — existing vectors are preserved via ES update.
+
+```bash
+SYNC_MODE=backfill python -m src.pipelines.embed_and_ingest
+```
+
+### Force full re-ingest + re-embed
+
+Use after a mapping change that affects analyzers, or after switching embedding models.
+
+```bash
+SYNC_MODE=full python -m src.pipelines.embed_and_ingest
+```
+
+### Re-ingest a single show
+
+Use to fix a specific show without touching anything else.
+
+```bash
+python -m src.pipelines.embed_and_ingest --show-id show:apple:12345678
+```
+
+### Re-index with new embedding model (alias switch pattern)
+
+Use after upgrading the embedding model (e.g. Phase 3-A: bge-zh upgrade).
+
+```bash
+# 1. Bump INDEX_VERSION to create a new backing index
+INDEX_VERSION=2 python -m src.pipelines.create_indices
+
+# 2. Full re-embed into the new index
+INDEX_VERSION=2 SYNC_MODE=full python -m src.pipelines.embed_and_ingest
+
+# 3. Verify counts match, run regression gate
+python scripts/check_regression_gate.py
+
+# 4. Switch alias (run in Kibana)
+# POST /_aliases
+# { "actions": [
+#     { "remove": { "index": "podcast-episodes-zh-tw-v1", "alias": "episodes-zh-tw" } },
+#     { "add":    { "index": "podcast-episodes-zh-tw-v2", "alias": "episodes-zh-tw" } }
+# ] }
+```
+
+## API Endpoints
+
+The service exposes two endpoints used by `podcast-backend`:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `POST /embed` | Encode a query string to an embedding vector |
+
+```bash
+# Embed a query
+curl -X POST http://localhost:8000/embed \
+  -H "Content-Type: application/json" \
+  -d '{"texts": ["人工智慧"], "language": "zh-tw"}'
 ```
 
 ## Environment Variables
 
-### Basic Settings
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATA_DIR` | Local data directory | `data` |
-| `ES_HOST` | Elasticsearch URL | `http://localhost:9200` |
-| `LOG_LEVEL` | Log level | `INFO` |
-
-### Index Management
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `INDEX_VERSION` | Index version number | `1` |
-| `REINDEX` | Reindex on version upgrade | `false` |
-| `ALLOW_DELETE_BASE_INDEX` | Allow deleting non-aliased indices | `false` |
-
-### Remote Elasticsearch
-
-| Variable | Description |
-|----------|-------------|
-| `ES_API_KEY` | ES API Key (for remote auth) |
-
-## Testing
-
-```bash
-# Run all tests
-pytest
-
-# Run tests with coverage report
-pytest --cov=src --cov-report=html
-
-# Run specific test file
-pytest tests/cleaning/test_text_cleaner.py -v
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SQLITE_PATH` | `data/crawler.db` | SQLite path (v2 data source) |
+| `DATA_DIR` | `data` | Local data directory |
+| `ES_HOST` | `http://localhost:9200` | Elasticsearch URL |
+| `ES_API_KEY` | — | ES API key (remote auth) |
+| `INDEX_VERSION` | `1` | Index version number |
+| `LOG_LEVEL` | `INFO` | Log level |
+| `SYNC_MODE` | `incremental` | `full` / `incremental` / `backfill` / `single` |
+| `QUERY_LOG_PATH` | `logs/query_log.jsonl` | Query behavioral log |
+| `CLICK_LOG_PATH` | `logs/click_log.jsonl` | Click behavioral log |
+| `INGEST_CURSOR_PATH` | `data/ingest_cursor.json` | Incremental ingest cursor |
+| `ENABLE_LANGUAGE_SPLIT` | `true` | Use 3-index language-split layout (v2 default) |
+| `EMBEDDING_API_URL` | — | External embedding API URL (Phase 3-B) |
+| `EMBEDDING_API_KEY` | — | External embedding API key (Phase 3-B) |
 
 ## ES Index Structure
+
+### Index Naming Convention
+
+All podcast indices follow `podcast-{type}-{qualifier}_v{N}`:
+
+```
+alias              → backing index
+shows              → podcast-shows_v{N}
+episodes-zh-tw     → podcast-episodes-zh-tw_v{N}    (Traditional Chinese, IK analyzer)
+episodes-zh-cn     → podcast-episodes-zh-cn_v{N}    (Simplified Chinese, IK analyzer)
+episodes-en        → podcast-episodes-en_v{N}        (English, standard analyzer)
+```
+
+Backend always uses alias names — never the backing index name directly.
+
+### Episodes Indices (3 language-split indices)
+
+Episode document:
+```json
+{
+  "episode_id": "...",
+  "title": "Episode Title",
+  "description": "Cleaned description...",
+  "embedding": [0.1, 0.2, ...],
+  "published_at": "2026-01-18T06:00:00Z",
+  "duration_sec": 1800,
+  "language": "zh-tw",
+  "show": {
+    "show_id": "...",
+    "title": "Show Title",
+    "publisher": "Author Name",
+    "image_url": "https://example.com/cover.jpg",
+    "external_urls": { "apple_podcasts": "https://podcasts.apple.com/..." }
+  },
+  "audio": { "url": "https://..." }
+}
+```
 
 ### Shows Index
 
 ```json
 {
-  "show_id": "show:apple:123",
-  "title": "The Daily",
-  "publisher": "The New York Times",
-  "description": "This is what the news should sound like...",
-  "language": "en",
-  "categories": ["News", "News > Daily News"],
-  "explicit": false,
-  "show_type": "episodic",
-  "episode_count": 1500,
-  "last_episode_at": "2026-01-18T06:00:00Z",
-  "external_ids": { "apple": "123" },
-  "external_urls": { "apple": "https://podcasts.apple.com/us/podcast/..." },
-  "image_url": "https://is1-ssl.mzstatic.com/image/...",
-  "created_at": "2026-01-14T12:00:00Z",
-  "updated_at": "2026-01-18T06:00:00Z"
+  "show_id": "...",
+  "title": "Show Title",
+  "publisher": "Author Name",
+  "description": "Show description...",
+  "language": "zh-tw",
+  "image_url": "https://example.com/cover.jpg",
+  "external_ids": { "apple_podcasts": "12345678" },
+  "external_urls": { "apple_podcasts": "https://podcasts.apple.com/..." },
+  "categories": ["Technology", "Technology > AI"],
+  "episode_count": 150,
+  "last_episode_at": "2026-03-20T00:00:00Z",
+  "updated_at": "2026-03-20T00:00:00Z"
 }
 ```
 
-### Episodes Index
+## Embedding Architecture
 
-```json
-{
-  "episode_id": "episode:apple:123:ep1",
-  "title": "Episode Title",
-  "description": "Cleaned episode description (boilerplate removed)...",
-  "embedding": [0.1, 0.2, ...],
-  "published_at": "2026-01-18T06:00:00Z",
-  "duration_sec": 1800,
-  "language": "en",
-  "show": {
-    "show_id": "show:apple:123",
-    "title": "The Daily",
-    "publisher": "The New York Times",
-    "image_url": "https://is1-ssl.mzstatic.com/image/...",
-    "external_urls": {
-      "apple_podcasts": "https://podcasts.apple.com/us/podcast/..."
-    }
-  },
-  "audio": {
-    "url": "https://..."
-  },
-  "created_at": "2026-01-18T06:00:00Z",
-  "updated_at": "2026-01-18T06:00:00Z"
-}
-```
+| Use case | Backend | Model |
+|----------|---------|-------|
+| Index-time (zh-tw, zh-cn) | `LocalEmbeddingBackend` | `BAAI/bge-base-zh-v1.5` (768 dim) |
+| Index-time (en) | `LocalEmbeddingBackend` | `paraphrase-multilingual-MiniLM-L12-v2` (384 dim) |
+| Query-time | `/embed` 由 `EMBEDDING_STRATEGY` 決定（`local` 或 `api`） | 與 backend 選擇一致 |
 
----
-
-## Search Features
-
-### Hybrid Search (BM25 + kNN + RRF)
-
-Supports three search modes:
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `bm25` | Pure text matching | Keyword search |
-| `knn` | Pure semantic search | Concept search |
-| `hybrid` | BM25 + kNN + RRF fusion | **Recommended** |
-
-```python
-from src.services.search_service import SearchService, SearchMode
-
-service = SearchService()
-
-# Hybrid search (recommended)
-results = service.search_hybrid("podcast about AI", size=10)
-
-# BM25 only
-results = service.search_bm25("tech news", size=10)
-
-# kNN only
-results = service.search_knn("machine learning tutorials", size=10)
-```
-
-**RRF (Reciprocal Rank Fusion)**:
-- Combines BM25 and kNN rankings without score normalization
-- Manual implementation (ES RRF requires paid license)
-- Formula: `score = sum(1 / (rank_constant + rank_i))`
-
----
+`create_backend()` 目前以 `EMBEDDING_STRATEGY` 環境變數決定使用 `LocalEmbeddingBackend` 或 `APIEmbeddingBackend`；沒有依 LRU hit rate 自動切換 backend 的機制。
 
 ## Search Evaluation
 
-No-annotation evaluation system to validate search quality without manual labeling.
+Evaluation is structured as three check groups. See `podcast-doc/v2/2026-03-25-search-evaluation-v2.md` for full framework details.
 
-### Metrics
+### Correctness (run before deploy)
 
-| Metric | Description | Target |
-|--------|-------------|--------|
-| Same-Podcast Dominance | % of top-K from same show | < 50% |
-| Extraneous Intrusion | % of top-K with ad content | < 10% |
-| Query Perturbation Stability | Robustness to query variations | > 70% |
-
-### Running Evaluation
+Data quality checks — are the indices healthy and is routing correct?
 
 ```bash
-# Full evaluation (30 queries)
-python -m src.pipelines.evaluate_search
+# Index health: embedding coverage ≥ 99%, zero-result rate < 5%
+python scripts/index_health_report.py --output data/evaluation/index_health.json
 
-# Custom queries
-python -m src.pipelines.evaluate_search --queries data/test_queries.txt
-
-# Output to specific path
-python -m src.pipelines.evaluate_search --output data/evaluation/report.json
+# Language routing accuracy: ≥ 95% precision, ≥ 90% recall
+# Requires labeled sample at data/evaluation/language_detection_sample.json
+python scripts/evaluate_language_detection.py
 ```
 
-### Sample Output
+**Current status**: Index health PASS. Language routing FAIL — 3 shows have wrong RSS `<language>` tags routed to `en` index; fix is in the crawler/ingest layer.
 
-```
-============================================================
-Search Quality Evaluation Report
-============================================================
-Metrics Summary:
-  Same-Podcast Dominance:   23.00%  PASS
-  Extraneous Intrusion:      0.00%  PASS
-  Query Perturbation Stability: 81.00%  PASS
+### Offline Quality (run before deploy and on PR)
 
-Overall: PASS
-============================================================
-```
-
-### Components
-
-- **ExtraneousScorer**: Detects sponsor/CTA/promo content in paragraphs
-- **NoAnnotationEvaluator**: Computes 4 metrics without ground truth labels
-- **EvaluationPipeline**: Runs evaluation and generates reports
-
----
-
-## Data Cleaning Pipeline
-
-Three-layer architecture for podcast text cleaning:
-
-```
-Layer 1: Raw RSS XML  → From podcast-crawler (../podcast-crawler/data/raw/rss/)
-Layer 2: Cleaned JSON → Boilerplate removed, normalized (data/cleaned/episodes/)
-Layer 3: Embedding    → Title-weighted, truncated for embedding (data/embedding_input/)
-```
-
-### Data Mapping from Crawler
-
-The search service handles data mapping from crawler output:
-
-**Shows (`ingest_shows.py`)**:
-- Maps `provider` field to external ID/URL keys
-- Crawler uses `{"provider": "apple", "external_urls": {"apple_podcasts": "..."}}`
-- Search normalizes to `{"external_ids": {"apple": "..."}, "external_urls": {"apple": "..."}}`
-- Extracts `image.url` → `image_url`
-
-**Episodes (`embed_and_ingest.py`)**:
-- Embeds show metadata into episode documents
-- Includes `show.image_url` and `show.external_urls` for frontend display
-- Sources show data from `data/normalized/shows/*.json`
-
-### Cleaning Features
-
-- **HTML → Plain Text**: BeautifulSoup parsing, entity decoding
-- **Boilerplate Removal**: Sponsors, CTAs, hosting info, production credits
-- **Frequency Filtering**: Removes paragraphs appearing in >25% of episodes (fixed intro/outro)
-- **Multilingual Support**: Chinese and English pattern matching
-
-### Running Data Pipelines
+Search quality checks — does ranking meet regression thresholds?
 
 ```bash
-# Step 1: Clean episodes (Layer 1 → Layer 2)
-python -m src.pipelines.clean_episodes
+# Run the full suite (Correctness + Offline Quality, ~4 min, requires local ES)
+python scripts/run_evaluation_suite.py
+# Output: data/evaluation/reports/{date}/suite_report.json
 
-# Step 2: Build embedding input (Layer 2 → Layer 3)
-python -m src.pipelines.build_embedding_input
+# Run only the NDCG evaluation
+python scripts/evaluate_ndcg_mrr.py \
+    --output data/evaluation/reports/$(date +%Y-%m-%d)/ndcg_mrr_report.json
 
-# Step 3: Generate embeddings and ingest to ES
-python -m src.pipelines.embed_and_ingest --batch-size 64
+# Check regression against thresholds: zh-tw ≥ 0.897 | zh-cn ≥ 0.897 (provisional) | en ≥ 0.853
+python scripts/check_regression_gate.py --report evaluation/ndcg_mrr_baseline.json
+
+# Latency baseline (full, 20 runs — use to rebuild baseline)
+python scripts/benchmark_latency.py --runs 20 --output data/benchmark/latency_baseline.json
+
+# Latency quick check (5 runs — used by suite)
+python scripts/benchmark_latency.py --quick
 ```
 
----
-
-## Common Kibana Queries
+**PR Gate**: `pr-gate.yml` runs `check_regression_gate.py` against `evaluation/ndcg_mrr_baseline.json` in warning mode (`continue-on-error: true`). To update the baseline after a suite run:
 
 ```bash
-# Check index status
-GET _cat/indices?v
-
-# Check aliases
-GET _aliases
-
-# Search shows
-GET shows/_search
-{
-  "query": { "match": { "title": "podcast" } }
-}
-
-# Episodes autocomplete
-GET episodes/_search
-{
-  "query": {
-    "match": {
-      "title.autocomplete": "the d"
-    }
-  }
-}
-
-# Filter episodes by show
-GET episodes/_search
-{
-  "query": {
-    "term": { "show.show_id": "show:apple:123" }
-  }
-}
-
-# Hybrid search with kNN
-GET episodes/_search
-{
-  "query": {
-    "bool": {
-      "should": [
-        { "multi_match": { "query": "AI", "fields": ["title^3", "description"] } }
-      ]
-    }
-  },
-  "knn": {
-    "field": "embedding",
-    "query_vector": [0.1, 0.2, ...],
-    "k": 10,
-    "num_candidates": 100
-  }
-}
+cp data/evaluation/reports/$(date +%Y-%m-%d)/ndcg_mrr_report.json evaluation/ndcg_mrr_baseline.json
+# then commit evaluation/ndcg_mrr_baseline.json
 ```
 
----
+### Online Behavior (weekly, post-launch)
+
+Behavioral metrics from real user traffic.
+
+```bash
+python scripts/compute_online_metrics.py \
+  --query-log logs/query_log.jsonl \
+  --click-log logs/click_log.jsonl
+```
+
+Thresholds: Search Success Rate ≥ 60%, Same-Language Click Rate ≥ 80%, Reformulation Rate ≤ 20%.
+
+### Weekly Report
+
+```bash
+python scripts/generate_weekly_report.py \
+    --date $(date +%Y-%m-%d) \
+    --prev-date YYYY-MM-DD \
+    --query-log logs/query_log.jsonl \
+    --click-log logs/click_log.jsonl \
+    --output reports/weekly_$(date +%Y-%m-%d).md
+```
+
+Produces a Markdown report combining Offline Quality method comparison, per-query NDCG delta vs previous run, and Online Behavior metrics.
+
+## Testing
+
+```bash
+# Unit tests (fast, no ES required)
+pytest tests/unit/ -v
+
+# Integration tests (require running ES)
+pytest tests/integration/ -v -m integration
+
+# All non-integration tests with coverage
+pytest --ignore=tests/integration -q --cov=src
+```
 
 ## Related Projects
 
-- **podcast-crawler**: RSS fetching service (raw XML + show metadata)
-- **podcast-api**: Search API service
+- **podcast-crawler**: RSS fetching service (produces `crawler.db` + raw RSS XML)
+- **podcast-backend**: Search API consumed by frontend (routes queries to this service's `/embed`)
 - **podcast-frontend**: Frontend interface

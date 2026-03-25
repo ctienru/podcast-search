@@ -60,6 +60,7 @@ def build_annotation_pool(
 
     for i, q in enumerate(queries):
         query_text = q["query"]
+        query_language = {"mixed": "zh-tw"}.get(q.get("language", "zh-tw"), q.get("language", "zh-tw"))
         logger.info(
             "processing_query",
             extra={"index": i + 1, "total": len(queries), "query": query_text},
@@ -71,7 +72,7 @@ def build_annotation_pool(
         # BM25 search (evaluation mode: no time_decay, no language filter)
         try:
             bm25_response = search_service.search_bm25(
-                query_text, size=k, evaluation_mode=True
+                query_text, size=k, evaluation_mode=True, language=query_language
             )
             methods_results.append(("bm25", bm25_response.results))
             logger.debug(
@@ -87,7 +88,7 @@ def build_annotation_pool(
 
         # kNN (embedding) search
         try:
-            knn_response = search_service.search_knn(query_text, size=k)
+            knn_response = search_service.search_knn(query_text, size=k, language=query_language)
             methods_results.append(("embedding", knn_response.results))
             logger.debug(
                 "embedding_results",

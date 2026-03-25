@@ -4,7 +4,9 @@ from typing import Dict, Iterable, Optional
 from elasticsearch import helpers
 
 from src.services.es_service import ElasticsearchService
-from src.storage import storage
+from src.storage.base import StorageBase
+from src.storage.factory import create_storage
+from src.types import Show
 from src.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -16,9 +18,8 @@ class IngestShowsPipeline:
     """
     Ingest canonical show documents into Elasticsearch `shows` index (alias).
 
-    - Reads canonical show JSONs from storage
-    - Projects them into search-optimized documents
-    - Bulk indexes into ES using alias
+    Reads shows from SQLiteStorage (v2), projects them into search-optimized
+    documents, and bulk indexes into ES using the shows alias.
     """
 
     INDEX_ALIAS = "shows"
@@ -26,24 +27,48 @@ class IngestShowsPipeline:
     def __init__(
         self,
         es_service: Optional[ElasticsearchService] = None,
+        storage: Optional[StorageBase] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
+        self.storage = storage or create_storage()
 
     # ---------- load ----------
 
+    @staticmethod
+    def _show_to_dict(show: Show) -> Dict:
+        """Convert Show dataclass to a dict for to_es_doc().
+
+        Adapts the flat Show fields to the nested structure to_es_doc() expects:
+        - image_url  → {"image": {"url": ...}} so to_es_doc can call image.get("url")
+        - episode_count / last_episode_at → {"episode_stats": {...}}
+        - external_urls / provider / external_id passed through as-is
+        """
+        return {
+            "show_id":      show.show_id,
+            "provider":     show.provider or "apple_podcasts",
+            "external_id":  show.external_id,
+            "title":        show.title,
+            "author":       show.author,
+            "description":  show.description,
+            "language":     show.language_detected,
+            "updated_at":   show.updated_at,
+            "image":        {"url": show.image_url} if show.image_url else {},
+            "external_urls": dict(show.external_urls),
+            "episode_stats": {
+                "episode_count":   show.episode_count,
+                "last_episode_at": show.last_episode_at,
+            },
+            "categories": list(show.categories),
+        }
+
     def load_shows(self) -> Iterable[Dict]:
+        """Load all canonical shows from SQLiteStorage.
+
+        Reads Show dataclasses via get_shows() and converts them to dicts
+        for downstream transformation.
         """
-        Load all canonical shows from storage.
-        """
-        for show_id in storage.list_show_ids():
-            data = storage.load_show(show_id)
-            if not data:
-                logger.warning(
-                    "show_not_found_in_storage",
-                    extra={"show_id": show_id},
-                )
-                continue
-            yield data
+        for show in self.storage.get_shows():
+            yield self._show_to_dict(show)
 
     # ---------- transform ----------
 
@@ -80,7 +105,7 @@ class IngestShowsPipeline:
 
                 # ---- external urls ----
                 "external_urls": {
-                    provider: external_url,
+                    external_url_key: external_url,
                 },
 
                 # ---- content ----

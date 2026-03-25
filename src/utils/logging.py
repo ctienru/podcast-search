@@ -6,10 +6,13 @@ from pathlib import Path
 
 
 class ExtraJsonFormatter(logging.Formatter):
+    SERVICE = "podcast-search"
+
     def format(self, record: logging.LogRecord) -> str:
         log = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
+            "service": self.SERVICE,
             "logger": record.name,
             "message": record.getMessage(),
         }

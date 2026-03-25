@@ -4,7 +4,6 @@ import pytest
 from src.evaluation.extraneous_scorer import (
     ExtraneousScorer,
     ParagraphScore,
-    DocumentScore,
 )
 
 
@@ -275,122 +274,6 @@ class TestBoilerplateCorpus:
 
         # Should not have boilerplate_similarity or should be 0
         assert result.features.get("boilerplate_similarity", 0) == 0
-
-
-class TestScoreDocument:
-    """Test document scoring."""
-
-    def test_scores_document(self, scorer):
-        """Test scoring entire document."""
-        paragraphs = [
-            "Clean content paragraph about technology.",
-            "Another paragraph about innovation.",
-            "This episode is sponsored by XYZ Company.",
-        ]
-
-        result = scorer.score_document("ep_123", paragraphs)
-
-        assert isinstance(result, DocumentScore)
-        assert result.episode_id == "ep_123"
-        assert result.total_paragraphs == 3
-        assert len(result.paragraph_scores) == 3
-
-    def test_counts_extraneous_paragraphs(self, scorer):
-        """Test counting extraneous paragraphs."""
-        paragraphs = [
-            "Clean content.",
-            "Sponsored by ABC. Use code XYZ for 20% off.",
-            "Subscribe to our channel!",
-        ]
-
-        result = scorer.score_document("ep_count", paragraphs)
-
-        assert result.extraneous_paragraphs <= result.total_paragraphs
-
-    def test_calculates_average_score(self, scorer):
-        """Test average score calculation."""
-        paragraphs = [
-            "Clean content.",
-            "More clean content.",
-        ]
-
-        result = scorer.score_document("ep_avg", paragraphs)
-
-        assert 0 <= result.avg_extraneous_score <= 1
-
-    def test_calculates_max_score(self, scorer):
-        """Test max score calculation."""
-        paragraphs = [
-            "Clean content.",
-            "This episode is sponsored by XYZ. Use code ABC for discount.",
-        ]
-
-        result = scorer.score_document("ep_max", paragraphs)
-
-        assert result.max_extraneous_score >= result.avg_extraneous_score
-
-    def test_handles_empty_paragraphs_list(self, scorer):
-        """Test handling empty paragraphs list."""
-        result = scorer.score_document("ep_empty", [])
-
-        assert result.total_paragraphs == 0
-        assert result.extraneous_paragraphs == 0
-        assert result.avg_extraneous_score == 0.0
-        assert result.max_extraneous_score == 0.0
-
-
-class TestToDict:
-    """Test dict conversion."""
-
-    def test_converts_document_score_to_dict(self, scorer):
-        """Test conversion of DocumentScore to dict."""
-        paragraphs = ["Clean content.", "Sponsored paragraph."]
-        doc_score = scorer.score_document("ep_dict", paragraphs)
-
-        result = scorer.to_dict(doc_score)
-
-        assert result["episode_id"] == "ep_dict"
-        assert result["total_paragraphs"] == 2
-        assert "extraneous_paragraphs" in result
-        assert "avg_extraneous_score" in result
-        assert "max_extraneous_score" in result
-        assert "paragraph_scores" in result
-
-    def test_truncates_long_text_in_dict(self, scorer):
-        """Test that long text is truncated in dict."""
-        long_text = "A" * 500
-        paragraphs = [long_text]
-        doc_score = scorer.score_document("ep_long", paragraphs)
-
-        result = scorer.to_dict(doc_score)
-
-        para_text = result["paragraph_scores"][0]["text"]
-        assert len(para_text) <= 203  # 200 + "..."
-
-    def test_rounds_scores_in_dict(self, scorer):
-        """Test that scores are rounded in dict."""
-        paragraphs = ["Test content."]
-        doc_score = scorer.score_document("ep_round", paragraphs)
-
-        result = scorer.to_dict(doc_score)
-
-        # Check that scores are rounded to 4 decimal places
-        assert isinstance(result["avg_extraneous_score"], float)
-        assert isinstance(result["max_extraneous_score"], float)
-
-    def test_includes_paragraph_details(self, scorer):
-        """Test that paragraph details are included."""
-        paragraphs = ["Test paragraph content."]
-        doc_score = scorer.score_document("ep_details", paragraphs)
-
-        result = scorer.to_dict(doc_score)
-
-        para = result["paragraph_scores"][0]
-        assert "text" in para
-        assert "features" in para
-        assert "extraneous_score" in para
-        assert "is_extraneous" in para
-        assert "matched_patterns" in para
 
 
 class TestEdgeCases:

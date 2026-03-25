@@ -11,10 +11,13 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from src.cleaning.rss_parser import RSSParser, RawEpisode
 from src.cleaning.text_cleaner import PodcastTextCleaner
+from src.config.settings import ENABLE_LANGUAGE_SPLIT
+from src.storage.base import StorageBase
+from src.storage.factory import create_storage
 from src.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -42,16 +45,25 @@ class CleanEpisodesPipeline:
         raw_rss_dir: Path,
         output_dir: Path,
         show_ids: Optional[list[str]] = None,
+        storage: Optional[StorageBase] = None,
+        enable_language_split: Optional[bool] = None,
     ):
         """
         Args:
             raw_rss_dir: Directory containing RSS XML files
             output_dir: Output directory for cleaned JSON files
             show_ids: Optional list of show IDs to process (for testing)
+            storage: Storage backend for show metadata (default: create_storage())
+            enable_language_split: Override ENABLE_LANGUAGE_SPLIT env var (for testing)
         """
         self.raw_rss_dir = raw_rss_dir
         self.output_dir = output_dir
         self.show_ids = show_ids
+        self.storage = storage or create_storage()
+        self.enable_language_split = (
+            enable_language_split if enable_language_split is not None
+            else ENABLE_LANGUAGE_SPLIT
+        )
 
         self.parser = RSSParser()
         self.cleaner = PodcastTextCleaner()
@@ -85,6 +97,16 @@ class CleanEpisodesPipeline:
         else:
             xml_files = sorted(self.raw_rss_dir.glob("*.xml"))
 
+        # v2: pre-load show→target_index mapping from SQLite
+        target_index_by_show: Dict[str, str] = {}
+        if self.enable_language_split:
+            for show in self.storage.get_shows():
+                target_index_by_show[show.show_id] = show.target_index
+            logger.info(
+                "target_index_map_loaded",
+                extra={"show_count": len(target_index_by_show)},
+            )
+
         logger.info(
             "clean_pipeline_start",
             extra={"total_shows": len(xml_files)},
@@ -92,7 +114,7 @@ class CleanEpisodesPipeline:
 
         for xml_path in xml_files:
             try:
-                show_stats = self._process_show(xml_path)
+                show_stats = self._process_show(xml_path, target_index_by_show)
                 stats["shows_processed"] += 1
                 stats["episodes_processed"] += show_stats["episodes_processed"]
                 stats["episodes_failed"] += show_stats["episodes_failed"]
@@ -118,8 +140,18 @@ class CleanEpisodesPipeline:
 
         return stats
 
-    def _process_show(self, xml_path: Path) -> dict:
-        """Process a single show's RSS XML file."""
+    def _process_show(
+        self,
+        xml_path: Path,
+        target_index_by_show: Dict[str, str],
+    ) -> dict:
+        """Process a single show's RSS XML file.
+
+        Args:
+            xml_path: Path to the RSS XML file.
+            target_index_by_show: Mapping of show_id → target_index from SQLite.
+                Empty dict when ENABLE_LANGUAGE_SPLIT=False.
+        """
         show_stats = {
             "episodes_processed": 0,
             "episodes_failed": 0,
@@ -132,6 +164,7 @@ class CleanEpisodesPipeline:
         show, episodes = self.parser.parse_file(xml_path)
         show_id = show.show_id
         show_language = show.language  # From RSS <language> tag
+        target_index = target_index_by_show.get(show_id)
 
         logger.info(
             "processing_show",
@@ -151,7 +184,9 @@ class CleanEpisodesPipeline:
         # Process each episode
         for episode in episodes:
             try:
-                cleaned = self._clean_episode(episode, language=show_language)
+                cleaned = self._clean_episode(
+                    episode, language=show_language, target_index=target_index
+                )
                 self._save_cleaned(cleaned)
 
                 show_stats["episodes_processed"] += 1
@@ -183,9 +218,19 @@ class CleanEpisodesPipeline:
         return show_stats
 
     def _clean_episode(
-        self, episode: RawEpisode, language: Optional[str] = None
+        self,
+        episode: RawEpisode,
+        language: Optional[str] = None,
+        target_index: Optional[str] = None,
     ) -> dict:
-        """Clean a single episode and return Layer 2 dict."""
+        """Clean a single episode and return Layer 2 dict.
+
+        Args:
+            episode: Raw episode parsed from RSS XML.
+            language: Language code from RSS <language> tag.
+            target_index: v2 routing key from SQLite (e.g. "podcast-episodes-zh-tw").
+                None when ENABLE_LANGUAGE_SPLIT=False.
+        """
         cleaned = self.cleaner.clean_episode(
             episode_id=episode.episode_id,
             show_id=episode.show_id,
@@ -197,6 +242,10 @@ class CleanEpisodesPipeline:
         # Convert to dict and add timestamp
         result = self.cleaner.to_layer2_dict(cleaned)
         result["cleaning_meta"]["cleaned_at"] = datetime.now(timezone.utc).isoformat()
+
+        # v2: propagate target_index so embed_and_ingest can route to the right index
+        if target_index is not None:
+            result["target_index"] = target_index
 
         # Add original metadata for reference
         result["original_meta"] = {

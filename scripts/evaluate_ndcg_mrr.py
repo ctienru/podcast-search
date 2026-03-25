@@ -25,13 +25,24 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 
 from src.evaluation.ranking_metrics import mrr, ndcg_at_k
 from src.services.search_service import SearchService
+from src.types import Language
 from src.utils.logging import setup_logging
+
+
+def _map_language(lang: str) -> Language:
+    """Map query language labels to Language type used by search_knn().
+
+    test_queries.json now uses explicit language codes ('zh-tw', 'zh-cn', 'en').
+    'mixed' queries are routed to zh-tw as a fallback.
+    Unknown values pass through unchanged.
+    """
+    return {"mixed": "zh-tw"}.get(lang, lang)  # type: ignore[return-value]
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +96,7 @@ def evaluate_single_query(
     k: int = 10,
     include_hybrid: bool = False,
     mrr_threshold: int = 2,
+    language: str = "zh-tw",
 ) -> Dict[str, Dict[str, float]]:
     """
     Evaluate a single query against all methods.
@@ -112,7 +124,7 @@ def evaluate_single_query(
 
     # Embedding (kNN)
     try:
-        knn_response = search_service.search_knn(query_text, size=k)
+        knn_response = search_service.search_knn(query_text, size=k, language=_map_language(language))
         knn_ids = [r.episode_id for r in knn_response.results]
         knn_rel = get_relevance_vector(knn_ids, judgments, k)
         results["embedding"] = {
@@ -284,6 +296,7 @@ def evaluate_all(
             k=k,
             include_hybrid=include_hybrid,
             mrr_threshold=mrr_threshold,
+            language=q.get("language", "zh-tw"),
         )
 
         per_query_results[query_text] = results

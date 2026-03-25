@@ -5,6 +5,8 @@ Execute search quality evaluation and generate reports.
 
 Usage:
     python -m src.pipelines.evaluate_search
+    python -m src.pipelines.evaluate_search --mode hybrid
+    python -m src.pipelines.evaluate_search --mode all
     python -m src.pipelines.evaluate_search --queries data/test_queries.txt
     python -m src.pipelines.evaluate_search --output data/evaluation_report.json
 """
@@ -18,8 +20,14 @@ from typing import List, Optional
 
 from src.evaluation.extraneous_scorer import ExtraneousScorer
 from src.evaluation.metrics import NoAnnotationEvaluator, EvaluationResult, AggregatedMetrics
-from src.services.search_service import SearchService
+from src.services.search_service import SearchMode, SearchService
 from src.utils.logging import setup_logging
+
+MODE_MAP = {
+    "bm25": SearchMode.BM25,
+    "knn": SearchMode.KNN,
+    "hybrid": SearchMode.HYBRID,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +117,8 @@ class EvaluationPipeline:
         queries: Optional[List[str]] = None,
         query_file: Optional[Path] = None,
         include_debug: bool = False,
+        mode: SearchMode = SearchMode.HYBRID,
+        language: str = "en",
     ) -> dict:
         """
         Execute evaluation
@@ -117,6 +127,7 @@ class EvaluationPipeline:
             queries: List of queries (if None, load from query_file or use defaults)
             query_file: Query file path
             include_debug: Whether to include debug info
+            mode: Search mode to evaluate
 
         Returns:
             Evaluation report dict
@@ -129,7 +140,7 @@ class EvaluationPipeline:
 
         logger.info(
             "evaluation_start",
-            extra={"total_queries": len(queries), "k": self.k},
+            extra={"total_queries": len(queries), "k": self.k, "mode": mode.value, "language": language},
         )
 
         # Evaluate each query
@@ -139,7 +150,7 @@ class EvaluationPipeline:
         for i, query in enumerate(queries):
             try:
                 result = self.evaluator.evaluate_query(
-                    query, k=self.k, include_debug=include_debug
+                    query, k=self.k, include_debug=include_debug, mode=mode, language=language
                 )
                 results.append(result)
 
@@ -168,6 +179,8 @@ class EvaluationPipeline:
                 "timestamp": end_time.isoformat(),
                 "duration_sec": round(duration_sec, 2),
                 "k": self.k,
+                "mode": mode.value,
+                "language": language,
                 "total_queries": len(queries),
                 "successful_queries": len(results),
                 "failed_queries": len(failed_queries),
@@ -177,6 +190,7 @@ class EvaluationPipeline:
                 "cleaning_effective": aggregated.cleaning_effective,
                 "ranking_stable": aggregated.ranking_stable,
                 "no_show_dominance": aggregated.no_show_dominance,
+                "methods_complementary": aggregated.methods_complementary,
                 "overall_pass": (
                     aggregated.cleaning_effective
                     and aggregated.ranking_stable
@@ -218,24 +232,27 @@ class EvaluationPipeline:
         """Print summary"""
         summary = report["summary"]
         assessment = report["assessment"]
+        mode = report["meta"].get("mode", "hybrid")
+        lang = report["meta"].get("language", "en")
 
         print("\n" + "=" * 60)
-        print("Search Quality Evaluation Report")
+        print(f"Search Quality Evaluation Report  [mode: {mode}, lang: {lang}]")
         print("=" * 60)
         print(f"Total Queries: {report['meta']['total_queries']}")
         print(f"Successful: {report['meta']['successful_queries']}")
         print(f"Duration: {report['meta']['duration_sec']} sec")
         print()
         print("Metrics Summary:")
-        print(f"  Top-K Overlap:           {summary['avg_top_k_overlap']:.2%}")
+        print(f"  BM25-kNN Overlap:        {summary['avg_top_k_overlap']:.2%}  (low = methods are complementary)")
         print(f"  Same-Podcast Dominance:  {summary['avg_same_podcast_dominance']:.2%}")
         print(f"  Extraneous Intrusion:    {summary['avg_extraneous_intrusion']:.2%}")
         print(f"  Perturbation Stability:  {summary['avg_perturbation_stability']:.2%}")
         print()
         print("Assessment:")
-        print(f"  Cleaning effective (intrusion < 10%): {'PASS' if assessment['cleaning_effective'] else 'FAIL'}")
-        print(f"  Ranking stable (stability > 70%):     {'PASS' if assessment['ranking_stable'] else 'FAIL'}")
-        print(f"  No dominance (dominance < 50%):       {'PASS' if assessment['no_show_dominance'] else 'FAIL'}")
+        print(f"  Cleaning effective (intrusion < 10%):   {'PASS' if assessment['cleaning_effective'] else 'FAIL'}")
+        print(f"  Ranking stable (stability > 70%):       {'PASS' if assessment['ranking_stable'] else 'FAIL'}")
+        print(f"  No dominance (dominance < 50%):         {'PASS' if assessment['no_show_dominance'] else 'FAIL'}")
+        print(f"  Methods complementary (overlap < 30%):  {'PASS' if assessment['methods_complementary'] else 'FAIL'}")
         print()
         print(f"Overall: {'PASS' if assessment['overall_pass'] else 'FAIL'}")
         print("=" * 60 + "\n")
@@ -268,17 +285,59 @@ def run() -> None:
         action="store_true",
         help="Include debug info in report",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["bm25", "knn", "hybrid", "all"],
+        default="hybrid",
+        help="Search mode to evaluate (default: hybrid; 'all' runs all three)",
+    )
+    parser.add_argument(
+        "--language",
+        choices=["zh-tw", "zh-cn", "en"],
+        default="en",
+        help="Target language index to evaluate (default: en)",
+    )
 
     args = parser.parse_args()
-
     pipeline = EvaluationPipeline(k=args.k)
-    report = pipeline.run(query_file=args.queries, include_debug=args.debug)
 
-    # Save report
-    pipeline.save_report(report, args.output)
+    if args.mode == "all":
+        reports = {}
+        for mode_name, search_mode in MODE_MAP.items():
+            print(f"\n>>> Evaluating mode: {mode_name} for language: {args.language} ...")
+            report = pipeline.run(
+                query_file=args.queries, include_debug=args.debug, mode=search_mode, language=args.language
+            )
+            output_path = args.output.parent / f"report_{args.language}_{mode_name}.json"
+            pipeline.save_report(report, output_path)
+            pipeline.print_summary(report)
+            reports[mode_name] = report
 
-    # Print summary
-    pipeline.print_summary(report)
+        # Comparison table
+        print("=" * 70)
+        print(f"{'Mode':<8} {'Dominance':>10} {'Intrusion':>10} {'Stability':>10} {'BM25-kNN':>10} {'Overall':>8}")
+        print("-" * 70)
+        for mode_name, report in reports.items():
+            s = report["summary"]
+            a = report["assessment"]
+            overall = "PASS" if a["overall_pass"] else "FAIL"
+            print(
+                f"{mode_name:<8} "
+                f"{s['avg_same_podcast_dominance']:>9.1%} "
+                f"{s['avg_extraneous_intrusion']:>9.1%} "
+                f"{s['avg_perturbation_stability']:>9.1%} "
+                f"{s['avg_top_k_overlap']:>9.1%} "
+                f"{overall:>8}"
+            )
+        print("=" * 70 + "\n")
+    else:
+        search_mode = MODE_MAP[args.mode]
+        report = pipeline.run(
+            query_file=args.queries, include_debug=args.debug, mode=search_mode, language=args.language
+        )
+        output_path = args.output.parent / f"report_{args.language}_{args.mode}.json"
+        pipeline.save_report(report, output_path)
+        pipeline.print_summary(report)
 
 
 if __name__ == "__main__":

@@ -2,10 +2,6 @@
   "settings": {
     "analysis": {
       "filter": {
-        "t2s_convert": {
-          "type": "stconvert",
-          "convert_type": "t2s"
-        },
         "edge_ngram_filter": {
           "type": "edge_ngram",
           "min_gram": 2,
@@ -15,13 +11,11 @@
       "analyzer": {
         "ik_index_analyzer": {
           "type": "custom",
-          "tokenizer": "ik_max_word",
-          "filter": ["t2s_convert"]
+          "tokenizer": "ik_max_word"
         },
         "ik_search_analyzer": {
           "type": "custom",
-          "tokenizer": "ik_smart",
-          "filter": ["t2s_convert"]
+          "tokenizer": "ik_smart"
         },
         "autocomplete_analyzer": {
           "type": "custom",

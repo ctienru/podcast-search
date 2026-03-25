@@ -1,8 +1,9 @@
 """Tests for IngestShowsPipeline."""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import MagicMock
 from src.pipelines.ingest_shows import IngestShowsPipeline
+from src.types import Show
 
 
 class TestToEsDoc:
@@ -10,7 +11,7 @@ class TestToEsDoc:
 
     def test_complete_show_transformation(self):
         """Test transformation of complete show data."""
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
 
         show = {
             "show_id": "show_123",
@@ -65,7 +66,7 @@ class TestToEsDoc:
 
     def test_show_without_image(self):
         """Test transformation when show image is missing."""
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
 
         show = {
             "show_id": "show_123",
@@ -80,7 +81,7 @@ class TestToEsDoc:
 
     def test_show_without_episode_stats(self):
         """Test transformation when episode_stats is missing."""
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
 
         show = {
             "show_id": "show_123",
@@ -96,7 +97,7 @@ class TestToEsDoc:
 
     def test_default_provider_backward_compatibility(self):
         """Test that provider defaults to 'apple_podcasts' for backward compatibility."""
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
 
         show = {
             "show_id": "show_123",
@@ -118,7 +119,7 @@ class TestToEsDoc:
 
     def test_custom_provider(self):
         """Test that custom provider is used when specified."""
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
 
         show = {
             "show_id": "show_123",
@@ -140,7 +141,7 @@ class TestToEsDoc:
 
     def test_external_urls_handling(self):
         """Test that external_urls are correctly preserved."""
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
 
         show = {
             "show_id": "show_123",
@@ -161,43 +162,108 @@ class TestToEsDoc:
         assert "web" not in source["external_urls"] or source["external_urls"].get("web") is None
 
 
+def _make_show(show_id: str = "show_123", language: str = "zh-tw", **kwargs) -> Show:
+    return Show(
+        show_id=show_id,
+        title="Test Podcast",
+        author="Test Author",
+        language_detected=language,
+        language_confidence=0.95,
+        language_uncertain=False,
+        target_index=f"podcast-episodes-{language}",
+        rss_feed_url="http://feed.example/rss",
+        updated_at="2026-01-01T00:00:00Z",
+        **kwargs,
+    )
+
+
 class TestLoadShows:
     """Test the load_shows() method."""
 
-    @patch('src.pipelines.ingest_shows.storage')
-    def test_load_shows_success(self, mock_storage):
-        """Test successful loading of shows."""
-        show_data = {
-            "show_id": "show_123",
-            "title": "Test Podcast"
-        }
+    def test_load_shows_yields_all_shows(self) -> None:
+        """load_shows() should yield one dict per show returned by storage."""
+        mock_storage = MagicMock()
+        mock_storage.get_shows.return_value = iter([
+            _make_show("show_1"),
+            _make_show("show_2"),
+        ])
 
-        mock_storage.list_show_ids.return_value = ["show_123"]
-        mock_storage.load_show.return_value = show_data
-
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
-
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=mock_storage)
         shows = list(pipeline.load_shows())
 
-        assert len(shows) == 1
-        assert shows[0]["show_id"] == "show_123"
+        assert len(shows) == 2
+        assert shows[0]["show_id"] == "show_1"
+        assert shows[1]["show_id"] == "show_2"
 
-    @patch('src.pipelines.ingest_shows.storage')
-    def test_load_shows_with_missing_show(self, mock_storage, caplog):
-        """Test that missing shows are skipped with warning."""
-        mock_storage.list_show_ids.return_value = ["show_123", "show_456"]
-        mock_storage.load_show.side_effect = [
-            {"show_id": "show_123", "title": "Test 1"},
-            None  # Missing show
-        ]
+    def test_load_shows_maps_fields_correctly(self) -> None:
+        """_show_to_dict should map Show dataclass fields to the expected dict keys."""
+        mock_storage = MagicMock()
+        mock_storage.get_shows.return_value = iter([_make_show("show_123", "en")])
 
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
-
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=mock_storage)
         shows = list(pipeline.load_shows())
 
-        # Should only return the valid show
-        assert len(shows) == 1
         assert shows[0]["show_id"] == "show_123"
+        assert shows[0]["title"] == "Test Podcast"
+        assert shows[0]["author"] == "Test Author"
+        assert shows[0]["language"] == "en"
+
+    def test_load_shows_empty_storage(self) -> None:
+        """load_shows() should yield nothing when storage returns no shows."""
+        mock_storage = MagicMock()
+        mock_storage.get_shows.return_value = iter([])
+
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=mock_storage)
+        shows = list(pipeline.load_shows())
+
+        assert shows == []
+
+
+class TestShowFieldsFlowToEsDoc:
+    """Verify that Show dataclass optional fields reach the ES document via load_shows → to_es_doc."""
+
+    def _run(self, show: Show) -> dict:
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
+        return pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+
+    def test_image_url_in_es_doc(self):
+        """image_url from Show should appear in the ES document."""
+        show = _make_show(image_url="https://example.com/cover.jpg", provider="apple")
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["image_url"] == "https://example.com/cover.jpg"
+
+    def test_external_url_in_es_doc(self):
+        """Apple Podcasts URL from Show.external_urls should appear in the ES document."""
+        show = _make_show(
+            provider="apple",
+            external_urls={"apple_podcasts": "https://podcasts.apple.com/tw/podcast/123"},
+        )
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["external_urls"]["apple_podcasts"] == "https://podcasts.apple.com/tw/podcast/123"
+
+    def test_episode_count_in_es_doc(self):
+        """episode_count from Show should appear in the ES document."""
+        show = _make_show(episode_count=42, last_episode_at="2026-03-01T00:00:00Z")
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["episode_count"] == 42
+        assert source["last_episode_at"] == "2026-03-01T00:00:00Z"
+
+    def test_description_in_es_doc(self):
+        """description from Show should appear in the ES document."""
+        show = _make_show(description="A great tech podcast.")
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["description"] == "A great tech podcast."
+
+    def test_null_image_url_yields_none(self):
+        """Show with no image_url should produce image_url=None in ES doc."""
+        show = _make_show()  # no image_url
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
+        source = pipeline.to_es_doc(pipeline._show_to_dict(show))["_source"]
+        assert source["image_url"] is None
 
 
 class TestBuildActions:
@@ -205,7 +271,7 @@ class TestBuildActions:
 
     def test_build_actions_generates_docs(self):
         """Test that build_actions generates ES documents."""
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
 
         shows = [
             {"show_id": "show_1", "title": "Show 1"},
@@ -220,7 +286,7 @@ class TestBuildActions:
 
     def test_build_actions_handles_errors(self, caplog):
         """Test that build_actions handles transformation errors gracefully."""
-        pipeline = IngestShowsPipeline(es_service=MagicMock())
+        pipeline = IngestShowsPipeline(es_service=MagicMock(), storage=MagicMock())
 
         # Create invalid show that will cause error (missing show_id)
         shows = [

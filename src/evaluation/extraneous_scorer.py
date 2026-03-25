@@ -30,18 +30,6 @@ class ParagraphScore:
     matched_patterns: List[str] = field(default_factory=list)
 
 
-@dataclass
-class DocumentScore:
-    """Document overall score"""
-
-    episode_id: str
-    total_paragraphs: int
-    extraneous_paragraphs: int
-    avg_extraneous_score: float
-    max_extraneous_score: float
-    paragraph_scores: List[ParagraphScore]
-
-
 class ExtraneousScorer:
     """
     Paragraph-level extraneous content scorer
@@ -279,61 +267,3 @@ class ExtraneousScorer:
             matched_patterns=all_matched_patterns,
         )
 
-    def score_document(
-        self,
-        episode_id: str,
-        paragraphs: List[str],
-    ) -> DocumentScore:
-        """
-        Calculate extraneous score for an entire document
-
-        Args:
-            episode_id: Episode ID
-            paragraphs: List of paragraphs
-
-        Returns:
-            DocumentScore with overall and per-paragraph scores
-        """
-        paragraph_scores = [self.score_paragraph(p) for p in paragraphs]
-
-        if not paragraph_scores:
-            return DocumentScore(
-                episode_id=episode_id,
-                total_paragraphs=0,
-                extraneous_paragraphs=0,
-                avg_extraneous_score=0.0,
-                max_extraneous_score=0.0,
-                paragraph_scores=[],
-            )
-
-        extraneous_count = sum(1 for ps in paragraph_scores if ps.is_extraneous)
-        scores = [ps.extraneous_score for ps in paragraph_scores]
-
-        return DocumentScore(
-            episode_id=episode_id,
-            total_paragraphs=len(paragraphs),
-            extraneous_paragraphs=extraneous_count,
-            avg_extraneous_score=sum(scores) / len(scores),
-            max_extraneous_score=max(scores),
-            paragraph_scores=paragraph_scores,
-        )
-
-    def to_dict(self, doc_score: DocumentScore) -> dict:
-        """Convert DocumentScore to dict for JSON serialization"""
-        return {
-            "episode_id": doc_score.episode_id,
-            "total_paragraphs": doc_score.total_paragraphs,
-            "extraneous_paragraphs": doc_score.extraneous_paragraphs,
-            "avg_extraneous_score": round(doc_score.avg_extraneous_score, 4),
-            "max_extraneous_score": round(doc_score.max_extraneous_score, 4),
-            "paragraph_scores": [
-                {
-                    "text": ps.text[:200] + "..." if len(ps.text) > 200 else ps.text,
-                    "features": {k: round(v, 4) for k, v in ps.features.items()},
-                    "extraneous_score": round(ps.extraneous_score, 4),
-                    "is_extraneous": ps.is_extraneous,
-                    "matched_patterns": ps.matched_patterns,
-                }
-                for ps in doc_score.paragraph_scores
-            ],
-        }

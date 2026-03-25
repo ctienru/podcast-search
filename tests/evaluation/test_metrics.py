@@ -315,7 +315,7 @@ class TestCalculatePerturbationStability:
             make_search_result("ep_1"),
             make_search_result("ep_2"),
         ]
-        mock_search_service.search_hybrid.return_value = make_search_response(results)
+        mock_search_service.search.return_value = make_search_response(results)
 
         original_ids = {"ep_1", "ep_2"}
         stability = evaluator._calculate_perturbation_stability("AI podcast", original_ids, k=2)
@@ -325,7 +325,7 @@ class TestCalculatePerturbationStability:
     def test_unstable_search(self, evaluator, mock_search_service):
         """Test stability when search is unstable across perturbations."""
         # Different results for each query
-        mock_search_service.search_hybrid.side_effect = [
+        mock_search_service.search.side_effect = [
             make_search_response([make_search_result("ep_3"), make_search_result("ep_4")]),
             make_search_response([make_search_result("ep_5"), make_search_result("ep_6")]),
             make_search_response([make_search_result("ep_7"), make_search_result("ep_8")]),
@@ -338,7 +338,7 @@ class TestCalculatePerturbationStability:
 
     def test_handles_search_failure(self, evaluator, mock_search_service):
         """Test handling of search failures during perturbation."""
-        mock_search_service.search_hybrid.side_effect = Exception("Search failed")
+        mock_search_service.search.side_effect = Exception("Search failed")
 
         original_ids = {"ep_1", "ep_2"}
         stability = evaluator._calculate_perturbation_stability("AI podcast", original_ids, k=2)
@@ -366,7 +366,9 @@ class TestEvaluateQuery:
             make_search_result("ep_1", show_id="show_a", description="Clean content"),
             make_search_result("ep_2", show_id="show_b", description="More content"),
         ]
-        mock_search_service.search_hybrid.return_value = make_search_response(results)
+        mock_search_service.search.return_value = make_search_response(results)
+        mock_search_service.search_bm25.return_value = make_search_response(results)
+        mock_search_service.search_knn.return_value = make_search_response(results)
 
         result = evaluator.evaluate_query("test query", k=2)
 
@@ -379,53 +381,14 @@ class TestEvaluateQuery:
     def test_includes_debug_info_when_requested(self, evaluator, mock_search_service, mock_scorer):
         """Test that debug info is included when requested."""
         results = [make_search_result("ep_1", show_id="show_a")]
-        mock_search_service.search_hybrid.return_value = make_search_response(results)
+        mock_search_service.search.return_value = make_search_response(results)
+        mock_search_service.search_bm25.return_value = make_search_response(results)
+        mock_search_service.search_knn.return_value = make_search_response(results)
 
         result = evaluator.evaluate_query("test query", k=1, include_debug=True)
 
         assert result.after_ids is not None
         assert result.dominant_show_id is not None
-
-
-class TestEvaluateQueryWithBeforeAfter:
-    """Test before/after comparison evaluation."""
-
-    def test_calculates_top_k_overlap(self, evaluator, mock_scorer):
-        """Test Top-K overlap calculation."""
-        before_results = [
-            make_search_result("ep_1"),
-            make_search_result("ep_2"),
-            make_search_result("ep_3"),
-        ]
-        after_results = [
-            make_search_result("ep_2"),
-            make_search_result("ep_3"),
-            make_search_result("ep_4"),
-        ]
-
-        result = evaluator.evaluate_query_with_before_after(
-            "test query", before_results, after_results, k=3
-        )
-
-        # Intersection: {ep_2, ep_3} = 2, Union: {ep_1, ep_2, ep_3, ep_4} = 4
-        assert result.top_k_overlap == 0.5
-
-    def test_includes_debug_info(self, evaluator, mock_scorer, mock_search_service):
-        """Test debug info in before/after evaluation."""
-        # Mock search for perturbation stability
-        mock_search_service.search_hybrid.return_value = make_search_response([
-            make_search_result("ep_1"),
-        ])
-
-        before_results = [make_search_result("ep_1", show_id="show_a")]
-        after_results = [make_search_result("ep_2", show_id="show_b")]
-
-        result = evaluator.evaluate_query_with_before_after(
-            "test query", before_results, after_results, k=1, include_debug=True
-        )
-
-        assert result.before_ids is not None
-        assert result.after_ids is not None
 
 
 class TestAggregateResults:
@@ -521,6 +484,7 @@ class TestToDict:
             cleaning_effective=True,
             ranking_stable=True,
             no_show_dominance=True,
+            methods_complementary=False,
         )
 
         d = evaluator.aggregate_to_dict(aggregated)

@@ -210,3 +210,9 @@ __marimo__/
 data/
 .DS_Store
 logs/
+
+# Ad-hoc test scripts (root-level only, not tests/ directory)
+/test_*.py
+
+# Evaluation output text reports (use JSON reports in data/evaluation/)
+report_*.txt

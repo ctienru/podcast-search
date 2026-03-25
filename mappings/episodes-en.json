@@ -1,0 +1,173 @@
+{
+  "mappings": {
+    "dynamic": "strict",
+    "dynamic_templates": [
+      {
+        "external_ids_keywords": {
+          "path_match": "external_ids.*",
+          "mapping": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      {
+        "external_urls_keywords": {
+          "path_match": "external_urls.*",
+          "mapping": {
+            "type": "keyword",
+            "index": false,
+            "ignore_above": 512
+          }
+        }
+      },
+      {
+        "show_external_ids_keywords": {
+          "path_match": "show.external_ids.*",
+          "mapping": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      }
+    ],
+    "properties": {
+      "episode_id": {
+        "type": "keyword"
+      },
+      "external_ids": {
+        "type": "object",
+        "dynamic": true
+      },
+      "external_urls": {
+        "type": "object",
+        "dynamic": true
+      },
+      "title": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "description": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+      "itunes_summary": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+      "creator": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "episode_type": {
+        "type": "keyword"
+      },
+      "chapters": {
+        "type": "nested",
+        "properties": {
+          "start": {
+            "type": "keyword"
+          },
+          "title": {
+            "type": "text",
+            "analyzer": "standard"
+          }
+        }
+      },
+      "embedding": {
+        "type": "dense_vector",
+        "dims": 384,
+        "index": true,
+        "similarity": "cosine"
+      },
+      "language": {
+        "type": "keyword"
+      },
+      "published_at": {
+        "type": "date"
+      },
+      "duration_sec": {
+        "type": "integer"
+      },
+      "image_url": {
+        "type": "keyword",
+        "index": false
+      },
+      "audio": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "url": {
+            "type": "keyword",
+            "index": false
+          },
+          "type": {
+            "type": "keyword"
+          },
+          "length_bytes": {
+            "type": "long"
+          }
+        }
+      },
+      "show": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "show_id": {
+            "type": "keyword"
+          },
+          "external_ids": {
+            "type": "object",
+            "dynamic": true
+          },
+          "title": {
+            "type": "text",
+            "analyzer": "standard",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "publisher": {
+            "type": "text",
+            "analyzer": "standard",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "image_url": {
+            "type": "keyword",
+            "index": false
+          },
+          "external_urls": {
+            "type": "object",
+            "dynamic": true
+          }
+        }
+      },
+      "created_at": {
+        "type": "date"
+      },
+      "updated_at": {
+        "type": "date"
+      }
+    }
+  }
+}

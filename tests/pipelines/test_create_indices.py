@@ -16,8 +16,8 @@ class TestVersionedIndex:
             index_version=5
         )
 
-        assert pipeline._versioned_index("shows") == "shows_v5"
-        assert pipeline._versioned_index("episodes") == "episodes_v5"
+        assert pipeline._versioned_index("shows") == "shows-v5"
+        assert pipeline._versioned_index("episodes") == "episodes-v5"
 
     def test_versioned_index_version_1(self):
         """Test versioned index naming for version 1."""
@@ -27,7 +27,7 @@ class TestVersionedIndex:
             index_version=1
         )
 
-        assert pipeline._versioned_index("shows") == "shows_v1"
+        assert pipeline._versioned_index("shows") == "shows-v1"
 
 
 class TestEnsureAliasNameIsFree:
@@ -116,9 +116,9 @@ class TestCreateVersionedIndex:
 
         result = pipeline.create_versioned_index("shows")
 
-        assert result == "shows_v3"
+        assert result == "shows-v3"
         mock_loader.load.assert_called_once_with("shows")
-        mock_es.create_index.assert_called_once_with("shows_v3", mock_mapping)
+        mock_es.create_index.assert_called_once_with("shows-v3", mock_mapping)
 
     def test_skips_existing_index(self):
         """Test that existing index is not recreated."""
@@ -135,7 +135,7 @@ class TestCreateVersionedIndex:
 
         result = pipeline.create_versioned_index("shows")
 
-        assert result == "shows_v3"
+        assert result == "shows-v3"
         mock_loader.load.assert_not_called()
         mock_es.create_index.assert_not_called()
 
@@ -154,9 +154,9 @@ class TestReindexIfNeeded:
             reindex=True
         )
 
-        pipeline.reindex_if_needed("shows_v2", "shows_v3")
+        pipeline.reindex_if_needed("shows-v2", "shows-v3")
 
-        mock_es.reindex.assert_called_once_with("shows_v2", "shows_v3")
+        mock_es.reindex.assert_called_once_with("shows-v2", "shows-v3")
 
     def test_skips_when_reindex_disabled(self):
         """Test that reindex is skipped when disabled."""
@@ -168,7 +168,7 @@ class TestReindexIfNeeded:
             reindex=False
         )
 
-        pipeline.reindex_if_needed("shows_v2", "shows_v3")
+        pipeline.reindex_if_needed("shows-v2", "shows-v3")
 
         mock_es.reindex.assert_not_called()
 
@@ -183,7 +183,7 @@ class TestReindexIfNeeded:
             reindex=True
         )
 
-        pipeline.reindex_if_needed("shows_v2", "shows_v3")
+        pipeline.reindex_if_needed("shows-v2", "shows-v3")
 
         mock_es.reindex.assert_not_called()
 
@@ -202,11 +202,11 @@ class TestSwitchAlias:
             mapping_loader=MagicMock()
         )
 
-        pipeline.switch_alias("shows", "shows_v3")
+        pipeline.switch_alias("shows", "shows-v3")
 
         # Should only add the alias
         expected_actions = [
-            {"add": {"alias": "shows", "index": "shows_v3"}}
+            {"add": {"alias": "shows", "index": "shows-v3"}}
         ]
         mock_es.update_aliases.assert_called_once_with(expected_actions)
 
@@ -221,12 +221,12 @@ class TestSwitchAlias:
             mapping_loader=MagicMock()
         )
 
-        pipeline.switch_alias("shows", "shows_v3")
+        pipeline.switch_alias("shows", "shows-v3")
 
         # Should remove old alias and add new one
         expected_actions = [
             {"remove": {"alias": "shows", "index": "*"}},
-            {"add": {"alias": "shows", "index": "shows_v3"}}
+            {"add": {"alias": "shows", "index": "shows-v3"}}
         ]
         mock_es.update_aliases.assert_called_once_with(expected_actions)
 
@@ -253,7 +253,7 @@ class TestRunForIndex:
         pipeline.run_for_index("shows")
 
         # Should create index
-        mock_es.create_index.assert_called_once_with("shows_v1", {"mappings": {}})
+        mock_es.create_index.assert_called_once_with("shows-v1", {"mappings": {}})
 
         # Should not attempt reindex (no old_index for version 1)
         mock_es.reindex.assert_not_called()
@@ -266,9 +266,9 @@ class TestRunForIndex:
         mock_es = MagicMock()
 
         def index_exists_side_effect(index_name):
-            if index_name == "shows_v4":
+            if index_name == "shows-v4":
                 return True  # Old version exists
-            if index_name == "shows_v5":
+            if index_name == "shows-v5":
                 return False  # New version doesn't exist yet
             return False
 
@@ -288,10 +288,10 @@ class TestRunForIndex:
         pipeline.run_for_index("shows")
 
         # Should create new index
-        mock_es.create_index.assert_called_once_with("shows_v5", {"mappings": {}})
+        mock_es.create_index.assert_called_once_with("shows-v5", {"mappings": {}})
 
         # Should reindex from old version
-        mock_es.reindex.assert_called_once_with("shows_v4", "shows_v5")
+        mock_es.reindex.assert_called_once_with("shows-v4", "shows-v5")
 
         # Should switch alias
         mock_es.update_aliases.assert_called_once()
@@ -301,9 +301,9 @@ class TestRunForIndex:
         mock_es = MagicMock()
 
         def index_exists_side_effect(index_name):
-            if index_name == "shows_v4":
+            if index_name == "shows-v4":
                 return False  # Old versioned index doesn't exist
-            if index_name == "shows_v5":
+            if index_name == "shows-v5":
                 return False  # New version doesn't exist yet
             if index_name == "shows":
                 return True  # Alias points to a real index, so ES treats it as existing
@@ -325,4 +325,68 @@ class TestRunForIndex:
         pipeline.run_for_index("shows")
 
         # Should reindex from alias instead
-        mock_es.reindex.assert_called_once_with("shows", "shows_v5")
+        mock_es.reindex.assert_called_once_with("shows", "shows-v5")
+
+
+class TestRunLanguageSplit:
+    """Test the _run_language_split() orchestration method."""
+
+    def _make_pipeline(self, index_version=1, reindex=False):
+        mock_es = MagicMock()
+        mock_es.index_exists.return_value = False
+        mock_es.alias_exists.return_value = False
+        mock_loader = MagicMock()
+        mock_loader.load.return_value = {"mappings": {}}
+        return CreateIndicesPipeline(
+            es_service=mock_es,
+            mapping_loader=mock_loader,
+            index_version=index_version,
+            reindex=reindex,
+            enable_language_split=True,
+        ), mock_es, mock_loader
+
+    def test_shows_index_uses_podcast_prefix(self):
+        """_run_language_split() must create podcast-shows-v1, not shows-v1."""
+        pipeline, mock_es, mock_loader = self._make_pipeline()
+
+        pipeline._run_language_split()
+
+        created_indices = [call.args[0] for call in mock_es.create_index.call_args_list]
+        assert "podcast-shows-v1" in created_indices
+        assert "shows-v1" not in created_indices
+
+    def test_shows_alias_is_shows(self):
+        """shows alias must point to podcast-shows-v1."""
+        pipeline, mock_es, _ = self._make_pipeline()
+
+        pipeline._run_language_split()
+
+        all_actions = []
+        for call in mock_es.update_aliases.call_args_list:
+            all_actions.extend(call.args[0])
+
+        add_actions = [a["add"] for a in all_actions if "add" in a]
+        shows_adds = [a for a in add_actions if a["alias"] == "shows"]
+        assert len(shows_adds) == 1
+        assert shows_adds[0]["index"] == "podcast-shows-v1"
+
+    def test_shows_mapping_key_is_shows(self):
+        """create_versioned_index for shows must use mapping_key='shows'."""
+        pipeline, _, mock_loader = self._make_pipeline()
+
+        pipeline._run_language_split()
+
+        load_calls = [call.args[0] for call in mock_loader.load.call_args_list]
+        assert "shows" in load_calls
+        assert "podcast-shows" not in load_calls
+
+    def test_episode_indices_created_for_all_languages(self):
+        """_run_language_split() creates podcast-episodes-{lang}-v1 for zh-tw, zh-cn, en."""
+        pipeline, mock_es, _ = self._make_pipeline()
+
+        pipeline._run_language_split()
+
+        created_indices = [call.args[0] for call in mock_es.create_index.call_args_list]
+        assert "podcast-episodes-zh-tw-v1" in created_indices
+        assert "podcast-episodes-zh-cn-v1" in created_indices
+        assert "podcast-episodes-en-v1" in created_indices

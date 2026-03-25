@@ -19,7 +19,7 @@ from dataclasses import dataclass, asdict
 from typing import List, Optional, Set
 
 from src.evaluation.extraneous_scorer import ExtraneousScorer
-from src.services.search_service import SearchService, SearchResult
+from src.services.search_service import SearchMode, SearchService, SearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,12 @@ class EvaluationResult:
     """Evaluation result for a single query"""
 
     query: str
-    top_k_overlap: float  # Before/After Top-K overlap (Jaccard)
+    top_k_overlap: float  # BM25 vs kNN result overlap (Jaccard); low = complementary
     same_podcast_dominance: float  # Single podcast domination rate
     extraneous_intrusion: float  # Extraneous content intrusion rate
     perturbation_stability: float  # Query perturbation stability
 
     # Debug info
-    before_ids: Optional[List[str]] = None
     after_ids: Optional[List[str]] = None
     dominant_show_id: Optional[str] = None
     intrusion_episodes: Optional[List[str]] = None
@@ -55,6 +54,7 @@ class AggregatedMetrics:
     cleaning_effective: bool  # extraneous_intrusion < 0.1
     ranking_stable: bool  # perturbation_stability > 0.7
     no_show_dominance: bool  # same_podcast_dominance < 0.5
+    methods_complementary: bool  # bm25_knn_overlap < 0.3 (hybrid is worthwhile)
 
 
 class NoAnnotationEvaluator:
@@ -158,6 +158,8 @@ class NoAnnotationEvaluator:
         query: str,
         original_ids: Set[str],
         k: int,
+        mode: SearchMode = SearchMode.HYBRID,
+        language: str = "en",
     ) -> float:
         """
         Calculate query perturbation stability
@@ -172,7 +174,7 @@ class NoAnnotationEvaluator:
         stability_scores = []
         for pq in perturbed_queries:
             try:
-                pq_response = self.search.search_hybrid(pq, size=k)
+                pq_response = self.search.search(pq, mode=mode, size=k, language=language)
                 pq_ids = self._get_result_ids(pq_response.results)
                 sim = self._jaccard_similarity(original_ids, pq_ids)
                 stability_scores.append(sim)
@@ -191,6 +193,8 @@ class NoAnnotationEvaluator:
         query: str,
         k: int = 10,
         include_debug: bool = False,
+        mode: SearchMode = SearchMode.HYBRID,
+        language: str = "en",
     ) -> EvaluationResult:
         """
         Evaluate search quality for a single query
@@ -199,19 +203,30 @@ class NoAnnotationEvaluator:
             query: Search query
             k: Top-K result count
             include_debug: Whether to include debug info
+            mode: Search mode to evaluate (default: HYBRID)
 
         Returns:
             EvaluationResult with 4 metrics
         """
-        # Execute search
-        response = self.search.search_hybrid(query, size=k)
+        # Execute search using specified mode
+        response = self.search.search(query, mode=mode, size=k, language=language)
         results = response.results
         result_ids = self._get_result_ids(results)
 
-        # 1. Top-K Overlap (placeholder - needs before/after comparison)
-        # For now, we'll set this to 1.0 (same index)
-        # In actual use, you'd compare against a "before" index
-        top_k_overlap = 1.0
+        # 1. BM25 vs kNN Jaccard overlap (mode-independent)
+        # Measures how complementary the two retrieval methods are.
+        # Low overlap (<0.3) means BM25 and kNN capture different results — hybrid is worthwhile.
+        # Returns 0.0 if kNN is unavailable (e.g. dimension mismatch on mixed-language index).
+        try:
+            bm25_ids = self._get_result_ids(self.search.search_bm25(query, size=k, language=language).results)
+            knn_ids = self._get_result_ids(self.search.search_knn(query, size=k, language=language).results)
+            top_k_overlap = self._jaccard_similarity(bm25_ids, knn_ids)
+        except Exception as e:
+            logger.debug(
+                "bm25_knn_overlap_unavailable",
+                extra={"query": query, "reason": str(e)},
+            )
+            top_k_overlap = 0.0
 
         # 2. Same-Podcast Dominance
         dominance, dominant_show = self._calculate_same_podcast_dominance(results, k)
@@ -220,7 +235,7 @@ class NoAnnotationEvaluator:
         intrusion, intrusion_episodes = self._calculate_extraneous_intrusion(results, k)
 
         # 4. Perturbation Stability
-        stability = self._calculate_perturbation_stability(query, result_ids, k)
+        stability = self._calculate_perturbation_stability(query, result_ids, k, mode=mode, language=language)
 
         result = EvaluationResult(
             query=query,
@@ -247,62 +262,6 @@ class NoAnnotationEvaluator:
 
         return result
 
-    def evaluate_query_with_before_after(
-        self,
-        query: str,
-        before_results: List[SearchResult],
-        after_results: List[SearchResult],
-        k: int = 10,
-        include_debug: bool = False,
-    ) -> EvaluationResult:
-        """
-        Evaluate before/after search quality difference for a single query
-
-        Args:
-            query: Search query
-            before_results: Search results before cleaning
-            after_results: Search results after cleaning
-            k: Top-K result count
-            include_debug: Whether to include debug info
-
-        Returns:
-            EvaluationResult with 4 metrics
-        """
-        before_ids = self._get_result_ids(before_results[:k])
-        after_ids = self._get_result_ids(after_results[:k])
-
-        # 1. Top-K Overlap (Jaccard)
-        top_k_overlap = self._jaccard_similarity(before_ids, after_ids)
-
-        # 2. Same-Podcast Dominance (use after results)
-        dominance, dominant_show = self._calculate_same_podcast_dominance(
-            after_results, k
-        )
-
-        # 3. Extraneous Intrusion (use after results)
-        intrusion, intrusion_episodes = self._calculate_extraneous_intrusion(
-            after_results, k
-        )
-
-        # 4. Perturbation Stability (use after results)
-        stability = self._calculate_perturbation_stability(query, after_ids, k)
-
-        result = EvaluationResult(
-            query=query,
-            top_k_overlap=top_k_overlap,
-            same_podcast_dominance=dominance,
-            extraneous_intrusion=intrusion,
-            perturbation_stability=stability,
-        )
-
-        if include_debug:
-            result.before_ids = list(before_ids)
-            result.after_ids = list(after_ids)
-            result.dominant_show_id = dominant_show
-            result.intrusion_episodes = intrusion_episodes
-
-        return result
-
     def aggregate_results(
         self, results: List[EvaluationResult]
     ) -> AggregatedMetrics:
@@ -325,6 +284,7 @@ class NoAnnotationEvaluator:
                 cleaning_effective=False,
                 ranking_stable=False,
                 no_show_dominance=False,
+                methods_complementary=False,
             )
 
         n = len(results)
@@ -342,6 +302,7 @@ class NoAnnotationEvaluator:
             cleaning_effective=avg_intrusion < 0.1,
             ranking_stable=avg_stability > 0.7,
             no_show_dominance=avg_dominance < 0.5,
+            methods_complementary=avg_overlap < 0.3,
         )
 
     def to_dict(self, result: EvaluationResult) -> dict:

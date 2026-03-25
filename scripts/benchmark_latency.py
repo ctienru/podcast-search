@@ -1,45 +1,61 @@
 """
 Query Latency Benchmark
 
-Measures P50, P95, P99 latency for BM25, kNN, and Hybrid search.
+Measures P50, P95, P99 latency for BM25, kNN, and Hybrid search,
+broken down by language (en, zh-tw, zh-cn).
 
 Usage:
     python scripts/benchmark_latency.py
-    python scripts/benchmark_latency.py --runs 50
-    python scripts/benchmark_latency.py --output data/benchmark/latency_local.json
+    python scripts/benchmark_latency.py --runs 20
+    python scripts/benchmark_latency.py --language en
+    python scripts/benchmark_latency.py --output data/benchmark/latency_baseline.json
 """
 
 import argparse
 import json
+import os
 import statistics
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Dict, List, Any
 
 from src.services.search_service import SearchService, SearchMode
 
 
-# Test queries (mix of Chinese and English)
-TEST_QUERIES = [
-    "科技新聞",
-    "投資理財",
-    "學英文",
-    "AI 人工智慧",
-    "technology podcast",
-    "business news",
-    "self improvement",
-    "machine learning",
-    "如何開始投資",
-    "startup founders",
-]
+TEST_QUERIES: Dict[str, List[str]] = {
+    "en": [
+        "technology podcast",
+        "business news",
+        "self improvement",
+        "machine learning",
+        "artificial intelligence",
+        "startup founders",
+        "book recommendations",
+        "how to start a business",
+    ],
+    "zh-tw": [
+        "科技新聞",
+        "投資理財",
+        "學英文",
+        "AI 人工智慧",
+        "如何開始投資",
+    ],
+    "zh-cn": [
+        "科技资讯",
+        "投资理财",
+        "人工智能",
+        "如何开始投资理财",
+        "身心健康",
+    ],
+}
 
 
 @dataclass
 class LatencyStats:
-    """Latency statistics for a search mode."""
     mode: str
+    language: str
     runs: int
     min_ms: float
     max_ms: float
@@ -52,20 +68,15 @@ class LatencyStats:
 
 @dataclass
 class BenchmarkResult:
-    """Complete benchmark result."""
     timestamp: str
     environment: str
     total_runs_per_mode: int
-    queries_per_run: int
     es_host: str
-    bm25: LatencyStats
-    knn: LatencyStats
-    hybrid: LatencyStats
+    by_language: Dict[str, Any]
     breakdown: Dict[str, Any]
 
 
 def percentile(data: List[float], p: float) -> float:
-    """Calculate percentile."""
     sorted_data = sorted(data)
     k = (len(sorted_data) - 1) * p / 100
     f = int(k)
@@ -76,28 +87,23 @@ def percentile(data: List[float], p: float) -> float:
 def measure_latency(
     service: SearchService,
     queries: List[str],
+    language: str,
     mode: SearchMode,
     runs: int = 10,
 ) -> tuple[List[float], Dict[str, List[float]]]:
-    """
-    Measure search latency.
-
-    Returns:
-        Tuple of (total_latencies, per_query_latencies)
-    """
     total_latencies = []
     per_query_latencies = {q: [] for q in queries}
 
-    for run in range(runs):
+    for _ in range(runs):
         for query in queries:
             start = time.perf_counter()
 
             if mode == SearchMode.BM25:
-                service.search_bm25(query, size=10)
+                service.search_bm25(query, size=10, language=language)
             elif mode == SearchMode.KNN:
-                service.search_knn(query, size=10)
+                service.search_knn(query, size=10, language=language)
             else:
-                service.search_hybrid(query, size=10)
+                service.search_hybrid(query, size=10, language=language)
 
             elapsed_ms = (time.perf_counter() - start) * 1000
             total_latencies.append(elapsed_ms)
@@ -106,10 +112,10 @@ def measure_latency(
     return total_latencies, per_query_latencies
 
 
-def compute_stats(latencies: List[float], mode: str) -> LatencyStats:
-    """Compute latency statistics."""
+def compute_stats(latencies: List[float], mode: str, language: str) -> LatencyStats:
     return LatencyStats(
         mode=mode,
+        language=language,
         runs=len(latencies),
         min_ms=round(min(latencies), 2),
         max_ms=round(max(latencies), 2),
@@ -124,88 +130,121 @@ def compute_stats(latencies: List[float], mode: str) -> LatencyStats:
 def run_benchmark(
     runs: int = 10,
     environment: str = "local",
+    languages: List[str] = None,
 ) -> BenchmarkResult:
-    """Run the full benchmark."""
-    service = SearchService()
+    if languages is None:
+        languages = list(TEST_QUERIES.keys())
 
-    # Get ES host from environment
-    import os
+    service = SearchService()
     es_host = os.getenv("ES_HOST", "http://localhost:9200")
 
-    print(f"Running benchmark: {runs} runs x {len(TEST_QUERIES)} queries")
     print(f"ES Host: {es_host}")
     print(f"Environment: {environment}")
+    print(f"Languages: {', '.join(languages)}")
+    print(f"Runs: {runs} per query")
     print()
 
-    # Warm up (first query loads the model)
     print("Warming up...")
-    service.search_hybrid("test", size=10)
+    service.search_hybrid("test", size=10, language="en")
     print()
 
-    results = {}
-    breakdown = {}
+    by_language: Dict[str, Any] = {}
+    breakdown: Dict[str, Any] = {}
 
-    for mode in [SearchMode.BM25, SearchMode.KNN, SearchMode.HYBRID]:
-        print(f"Testing {mode.value}...")
-        latencies, per_query = measure_latency(service, TEST_QUERIES, mode, runs)
-        stats = compute_stats(latencies, mode.value)
-        results[mode.value] = stats
-        breakdown[mode.value] = {
-            q: {
-                "mean_ms": round(statistics.mean(times), 2),
-                "p50_ms": round(percentile(times, 50), 2),
+    for lang in languages:
+        queries = TEST_QUERIES[lang]
+        print(f"--- {lang} ({len(queries)} queries) ---")
+        lang_results: Dict[str, LatencyStats] = {}
+        lang_breakdown: Dict[str, Any] = {}
+
+        for mode in [SearchMode.BM25, SearchMode.KNN, SearchMode.HYBRID]:
+            latencies, per_query = measure_latency(service, queries, lang, mode, runs)
+            stats = compute_stats(latencies, mode.value, lang)
+            lang_results[mode.value] = stats
+            lang_breakdown[mode.value] = {
+                q: {
+                    "mean_ms": round(statistics.mean(times), 2),
+                    "p50_ms": round(percentile(times, 50), 2),
+                }
+                for q, times in per_query.items()
             }
-            for q, times in per_query.items()
+            print(f"  {mode.value:<8} P50={stats.p50_ms}ms  P95={stats.p95_ms}ms  P99={stats.p99_ms}ms")
+
+        by_language[lang] = {
+            "queries": len(queries),
+            "bm25": asdict(lang_results["bm25"]),
+            "knn": asdict(lang_results["knn"]),
+            "hybrid": asdict(lang_results["hybrid"]),
         }
-        print(f"  P50: {stats.p50_ms}ms, P99: {stats.p99_ms}ms")
+        breakdown[lang] = lang_breakdown
+        print()
 
     return BenchmarkResult(
         timestamp=datetime.now(timezone.utc).isoformat(),
         environment=environment,
         total_runs_per_mode=runs,
-        queries_per_run=len(TEST_QUERIES),
         es_host=es_host,
-        bm25=results["bm25"],
-        knn=results["knn"],
-        hybrid=results["hybrid"],
+        by_language=by_language,
         breakdown=breakdown,
     )
 
 
 def print_summary(result: BenchmarkResult) -> None:
-    """Print benchmark summary."""
+    print("=" * 65)
+    print(f"Query Latency Benchmark — {result.environment}")
+    print("=" * 65)
+    print(f"ES Host: {result.es_host}  |  Runs: {result.total_runs_per_mode} per query")
     print()
-    print("=" * 60)
-    print(f"Query Latency Benchmark - {result.environment}")
-    print("=" * 60)
-    print(f"ES Host: {result.es_host}")
-    print(f"Runs: {result.total_runs_per_mode} x {result.queries_per_run} queries")
-    print()
-    print(f"{'Mode':<10} {'P50':>10} {'P95':>10} {'P99':>10} {'Mean':>10}")
-    print("-" * 50)
 
-    for stats in [result.bm25, result.knn, result.hybrid]:
-        print(f"{stats.mode:<10} {stats.p50_ms:>9.1f}ms {stats.p95_ms:>9.1f}ms {stats.p99_ms:>9.1f}ms {stats.mean_ms:>9.1f}ms")
+    header = f"  {'Language':<8} {'Mode':<8} {'P50':>9} {'P95':>9} {'P99':>9} {'Mean':>9}"
+    print(header)
+    print("  " + "-" * 55)
 
-    print("=" * 60)
+    for lang, data in result.by_language.items():
+        for mode_key in ["bm25", "knn", "hybrid"]:
+            s = data[mode_key]
+            print(f"  {lang:<8} {mode_key:<8} {s['p50_ms']:>8.1f}ms {s['p95_ms']:>8.1f}ms {s['p99_ms']:>8.1f}ms {s['mean_ms']:>8.1f}ms")
+        print()
+
+    print("=" * 65)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Query Latency Benchmark")
     parser.add_argument("--runs", type=int, default=10, help="Number of runs per query")
-    parser.add_argument("--env", type=str, default="local", help="Environment name (local/cloud)")
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Quick mode: 5 runs per query (for use in evaluation suite)",
+    )
+    parser.add_argument("--env", type=str, default="local", help="Environment name")
+    parser.add_argument(
+        "--language",
+        type=str,
+        default="all",
+        help="Language to benchmark: en, zh-tw, zh-cn, or all (default: all)",
+    )
     parser.add_argument("--output", type=Path, help="Output JSON file path")
 
     args = parser.parse_args()
 
-    result = run_benchmark(runs=args.runs, environment=args.env)
+    runs = 5 if args.quick else args.runs
+
+    if args.language == "all":
+        languages = list(TEST_QUERIES.keys())
+    elif args.language in TEST_QUERIES:
+        languages = [args.language]
+    else:
+        parser.error(f"Unknown language '{args.language}'. Choose from: {', '.join(TEST_QUERIES)} or 'all'")
+
+    result = run_benchmark(runs=runs, environment=args.env, languages=languages)
     print_summary(result)
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w") as f:
             json.dump(asdict(result), f, indent=2)
-        print(f"\nSaved to: {args.output}")
+        print(f"Saved to: {args.output}")
 
 
 if __name__ == "__main__":

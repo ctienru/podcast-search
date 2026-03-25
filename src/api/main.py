@@ -16,23 +16,31 @@ API Endpoints:
 """
 
 import logging
-import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import router
+from src.utils.logging import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Pre-load backend/model on startup (optional, remove for faster cold start)."""
+    # Uncomment to pre-load backend:
+    # from src.api.routes import get_backend
+    # get_backend()
+    yield
+
 
 app = FastAPI(
     title="Podcast Embedding API",
     description="Embedding service for podcast search",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS - allow Java backend to call
@@ -48,10 +56,3 @@ app.add_middleware(
 app.include_router(router)
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Pre-load model on startup (optional, remove for faster cold start)."""
-    # Uncomment to pre-load model:
-    # from src.api.routes import get_encoder
-    # get_encoder()
-    pass

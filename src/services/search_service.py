@@ -30,8 +30,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from src.embedding.encoder import EmbeddingEncoder
+from src.embedding.backend import EmbeddingBackend
+from src.embedding.factory import create_backend
 from src.es.client import get_es_client
+from src.types import Language
 
 logger = logging.getLogger(__name__)
 
@@ -74,28 +76,39 @@ class SearchService:
     - kNN: Semantic similarity on embedding vectors
     """
 
-    INDEX = "episodes"
+    def _get_target_index(self, language: str) -> str:
+        from src.config import settings
+        if not settings.ENABLE_LANGUAGE_SPLIT:
+            return "episodes"
+        if language == "zh-cn":
+            return settings.INDEX_ZH_CN
+        if language == "en":
+            return settings.INDEX_EN
+        return settings.INDEX_ZH_TW
 
     # RRF parameters
     RRF_WINDOW_SIZE = 100
     RRF_RANK_CONSTANT = 60
+
+    # Diversity: max results from the same show in a single response
+    MAX_PER_SHOW = 3
 
     # kNN parameters
     KNN_NUM_CANDIDATES = 100
 
     def __init__(
         self,
-        encoder: Optional[EmbeddingEncoder] = None,
+        encoder: Optional[EmbeddingBackend] = None,
     ):
         self.client = get_es_client()
         self._encoder = encoder
 
     @property
-    def encoder(self) -> EmbeddingEncoder:
-        """Lazy load encoder."""
+    def encoder(self) -> EmbeddingBackend:
+        """Lazy load embedding backend."""
         if self._encoder is None:
             logger.info("loading_encoder_for_search")
-            self._encoder = EmbeddingEncoder()
+            self._encoder = create_backend()
         return self._encoder
 
     def _build_bm25_query(
@@ -230,6 +243,7 @@ class SearchService:
         query: str,
         size: int = 10,
         evaluation_mode: bool = False,
+        language: Language = "zh-tw",
     ) -> SearchResponse:
         """
         Pure BM25 text search.
@@ -239,6 +253,7 @@ class SearchService:
             size: Number of results to return
             evaluation_mode: If True, use evaluation-safe query
                 (no time_decay, no language filter, no match_phrase boost)
+            language: Target index language for routing.
 
         Returns:
             SearchResponse with results
@@ -252,7 +267,7 @@ class SearchService:
             ],
         }
 
-        response = self.client.search(index=self.INDEX, body=body)
+        response = self.client.search(index=self._get_target_index(language), body=body)
 
         hits = response.get("hits", {})
         results = self._parse_hits(hits.get("hits", []))
@@ -281,6 +296,7 @@ class SearchService:
         self,
         query: str,
         size: int = 10,
+        language: Language = "zh-tw",
     ) -> SearchResponse:
         """
         Exact phrase match search using match_phrase.
@@ -305,7 +321,7 @@ class SearchService:
             ],
         }
 
-        response = self.client.search(index=self.INDEX, body=body)
+        response = self.client.search(index=self._get_target_index(language), body=body)
 
         hits = response.get("hits", {})
         results = self._parse_hits(hits.get("hits", []))
@@ -333,6 +349,7 @@ class SearchService:
         self,
         query: str,
         size: int = 10,
+        language: Language = "zh-tw",
     ) -> SearchResponse:
         """
         Pure kNN semantic search.
@@ -340,12 +357,14 @@ class SearchService:
         Args:
             query: Search query text (will be encoded to vector)
             size: Number of results to return
+            language: Language of the query. Must match the target index language
+                so the correct embedding model and vector space are used.
+                Passing the wrong language silently returns wrong results.
 
         Returns:
             SearchResponse with results
         """
-        # Encode query to vector
-        query_vector = self.encoder.encode(query).tolist()
+        query_vector = self.encoder.embed(query, language=language)
 
         body = {
             "knn": self._build_knn_clause(query_vector, k=size),
@@ -356,7 +375,7 @@ class SearchService:
             ],
         }
 
-        response = self.client.search(index=self.INDEX, body=body)
+        response = self.client.search(index=self._get_target_index(language), body=body)
 
         hits = response.get("hits", {})
         results = self._parse_hits(hits.get("hits", []))
@@ -419,6 +438,7 @@ class SearchService:
         size: int = 10,
         rrf_window_size: Optional[int] = None,
         rrf_rank_constant: Optional[int] = None,
+        language: Language = "zh-tw",
     ) -> SearchResponse:
         """
         Hybrid search combining BM25 and kNN with RRF fusion.
@@ -436,6 +456,8 @@ class SearchService:
             size: Number of results to return
             rrf_window_size: Number of results to consider for RRF (default: 100)
             rrf_rank_constant: RRF constant k (default: 60)
+            language: Language of the query, passed through to search_knn() for
+                correct embedding model selection.
 
         Returns:
             SearchResponse with results
@@ -447,8 +469,17 @@ class SearchService:
         rank_constant = rrf_rank_constant or self.RRF_RANK_CONSTANT
 
         # Get results from both methods
-        bm25_response = self.search_bm25(query, size=window_size)
-        knn_response = self.search_knn(query, size=window_size)
+        bm25_response = self.search_bm25(query, size=window_size, language=language)
+        try:
+            knn_response = self.search_knn(query, size=window_size, language=language)
+        except Exception as e:
+            # kNN can fail when the index has mixed embedding dimensions (e.g. cross-language alias).
+            # Fall back to BM25-only results so hybrid search degrades gracefully.
+            logger.warning(
+                "search_knn_failed_in_hybrid_fallback_to_bm25",
+                extra={"query": query, "reason": str(e)},
+            )
+            knn_response = SearchResponse(results=[], total=0, took_ms=0, mode=SearchMode.KNN)
 
         # Compute RRF scores
         rrf_scores = self._compute_rrf_scores(
@@ -463,13 +494,19 @@ class SearchService:
             if result.episode_id not in result_map:
                 result_map[result.episode_id] = result
 
-        # Sort by RRF score and take top results
+        # Sort by RRF score and take top results, capped per show for diversity
         sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
 
         results = []
-        for episode_id in sorted_ids[:size]:
+        show_counts: Dict[str, int] = {}
+        for episode_id in sorted_ids:
+            if len(results) >= size:
+                break
             result = result_map[episode_id]
-            # Update score to RRF score
+            show_id = result.show_id or "__unknown__"
+            if show_counts.get(show_id, 0) >= self.MAX_PER_SHOW:
+                continue
+            show_counts[show_id] = show_counts.get(show_id, 0) + 1
             results.append(SearchResult(
                 episode_id=result.episode_id,
                 title=result.title,
@@ -510,6 +547,7 @@ class SearchService:
         query: str,
         mode: SearchMode = SearchMode.HYBRID,
         size: int = 10,
+        language: Language = "zh-tw",
         **kwargs,
     ) -> SearchResponse:
         """
@@ -519,16 +557,18 @@ class SearchService:
             query: Search query text
             mode: Search mode (BM25, KNN, HYBRID, or EXACT)
             size: Number of results to return
-            **kwargs: Additional arguments for specific search modes
+            language: Language of the query. Controls the target index for all
+                modes (BM25, KNN, HYBRID, EXACT) via _get_target_index().
+            **kwargs: Additional arguments forwarded to the underlying search method
 
         Returns:
             SearchResponse with results
         """
         if mode == SearchMode.BM25:
-            return self.search_bm25(query, size=size)
+            return self.search_bm25(query, size=size, language=language)
         elif mode == SearchMode.KNN:
-            return self.search_knn(query, size=size)
+            return self.search_knn(query, size=size, language=language)
         elif mode == SearchMode.EXACT:
-            return self.search_exact(query, size=size)
+            return self.search_exact(query, size=size, language=language)
         else:
-            return self.search_hybrid(query, size=size, **kwargs)
+            return self.search_hybrid(query, size=size, language=language, **kwargs)
