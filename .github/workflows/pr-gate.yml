@@ -25,3 +25,49 @@ jobs:
       - name: Run unit tests
         run: pytest tests/unit/ tests/pipelines/ -v --tb=short
 
+  ndcg-regression:
+    runs-on: ubuntu-latest
+    # Warning mode: never blocks merge. Update evaluation/ndcg_mrr_baseline.json
+    # after running `python scripts/run_evaluation_suite.py` locally.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (minimal — no ES, no model needed)
+        run: pip install -r requirements.txt
+
+      - name: Check baseline report exists
+        run: |
+          if [ ! -f evaluation/ndcg_mrr_baseline.json ]; then
+            echo "WARNING: evaluation/ndcg_mrr_baseline.json not found."
+            echo "Run 'python scripts/run_evaluation_suite.py' locally and commit the report."
+            exit 1
+          fi
+
+      - name: Check baseline report age
+        run: |
+          python - <<'EOF'
+          import json, sys
+          from datetime import datetime, timezone, timedelta
+          with open("evaluation/ndcg_mrr_baseline.json") as f:
+              report = json.load(f)
+          ts = report.get("meta", {}).get("timestamp", "")
+          if not ts:
+              print("WARNING: baseline report has no timestamp — cannot check age")
+              sys.exit(0)
+          age = datetime.now(timezone.utc) - datetime.fromisoformat(ts)
+          if age > timedelta(days=30):
+              print(f"WARNING: baseline report is {age.days} days old (>{30}d).")
+              print("Consider re-running 'python scripts/run_evaluation_suite.py' and committing.")
+          else:
+              print(f"Baseline report age: {age.days} days — OK")
+          EOF
+
+      - name: Run NDCG regression gate
+        run: python scripts/check_regression_gate.py --report evaluation/ndcg_mrr_baseline.json
+
