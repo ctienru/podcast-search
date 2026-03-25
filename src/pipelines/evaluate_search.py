@@ -118,6 +118,7 @@ class EvaluationPipeline:
         query_file: Optional[Path] = None,
         include_debug: bool = False,
         mode: SearchMode = SearchMode.HYBRID,
+        language: str = "en",
     ) -> dict:
         """
         Execute evaluation
@@ -139,7 +140,7 @@ class EvaluationPipeline:
 
         logger.info(
             "evaluation_start",
-            extra={"total_queries": len(queries), "k": self.k, "mode": mode.value},
+            extra={"total_queries": len(queries), "k": self.k, "mode": mode.value, "language": language},
         )
 
         # Evaluate each query
@@ -149,7 +150,7 @@ class EvaluationPipeline:
         for i, query in enumerate(queries):
             try:
                 result = self.evaluator.evaluate_query(
-                    query, k=self.k, include_debug=include_debug, mode=mode
+                    query, k=self.k, include_debug=include_debug, mode=mode, language=language
                 )
                 results.append(result)
 
@@ -179,6 +180,7 @@ class EvaluationPipeline:
                 "duration_sec": round(duration_sec, 2),
                 "k": self.k,
                 "mode": mode.value,
+                "language": language,
                 "total_queries": len(queries),
                 "successful_queries": len(results),
                 "failed_queries": len(failed_queries),
@@ -231,9 +233,10 @@ class EvaluationPipeline:
         summary = report["summary"]
         assessment = report["assessment"]
         mode = report["meta"].get("mode", "hybrid")
+        lang = report["meta"].get("language", "en")
 
         print("\n" + "=" * 60)
-        print(f"Search Quality Evaluation Report  [mode: {mode}]")
+        print(f"Search Quality Evaluation Report  [mode: {mode}, lang: {lang}]")
         print("=" * 60)
         print(f"Total Queries: {report['meta']['total_queries']}")
         print(f"Successful: {report['meta']['successful_queries']}")
@@ -288,6 +291,12 @@ def run() -> None:
         default="hybrid",
         help="Search mode to evaluate (default: hybrid; 'all' runs all three)",
     )
+    parser.add_argument(
+        "--language",
+        choices=["zh-tw", "zh-cn", "en"],
+        default="en",
+        help="Target language index to evaluate (default: en)",
+    )
 
     args = parser.parse_args()
     pipeline = EvaluationPipeline(k=args.k)
@@ -295,11 +304,11 @@ def run() -> None:
     if args.mode == "all":
         reports = {}
         for mode_name, search_mode in MODE_MAP.items():
-            print(f"\n>>> Evaluating mode: {mode_name} ...")
+            print(f"\n>>> Evaluating mode: {mode_name} for language: {args.language} ...")
             report = pipeline.run(
-                query_file=args.queries, include_debug=args.debug, mode=search_mode
+                query_file=args.queries, include_debug=args.debug, mode=search_mode, language=args.language
             )
-            output_path = args.output.parent / f"report_{mode_name}.json"
+            output_path = args.output.parent / f"report_{args.language}_{mode_name}.json"
             pipeline.save_report(report, output_path)
             pipeline.print_summary(report)
             reports[mode_name] = report
@@ -324,9 +333,10 @@ def run() -> None:
     else:
         search_mode = MODE_MAP[args.mode]
         report = pipeline.run(
-            query_file=args.queries, include_debug=args.debug, mode=search_mode
+            query_file=args.queries, include_debug=args.debug, mode=search_mode, language=args.language
         )
-        pipeline.save_report(report, args.output)
+        output_path = args.output.parent / f"report_{args.language}_{args.mode}.json"
+        pipeline.save_report(report, output_path)
         pipeline.print_summary(report)
 
 

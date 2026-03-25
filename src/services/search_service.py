@@ -76,7 +76,15 @@ class SearchService:
     - kNN: Semantic similarity on embedding vectors
     """
 
-    INDEX = "episodes"
+    def _get_target_index(self, language: str) -> str:
+        from src.config import settings
+        if not settings.ENABLE_LANGUAGE_SPLIT:
+            return "episodes"
+        if language == "zh-cn":
+            return settings.INDEX_ZH_CN
+        if language == "en":
+            return settings.INDEX_EN
+        return settings.INDEX_ZH_TW
 
     # RRF parameters
     RRF_WINDOW_SIZE = 100
@@ -235,6 +243,7 @@ class SearchService:
         query: str,
         size: int = 10,
         evaluation_mode: bool = False,
+        language: Language = "zh-tw",
     ) -> SearchResponse:
         """
         Pure BM25 text search.
@@ -244,6 +253,7 @@ class SearchService:
             size: Number of results to return
             evaluation_mode: If True, use evaluation-safe query
                 (no time_decay, no language filter, no match_phrase boost)
+            language: Target index language for routing.
 
         Returns:
             SearchResponse with results
@@ -257,7 +267,7 @@ class SearchService:
             ],
         }
 
-        response = self.client.search(index=self.INDEX, body=body)
+        response = self.client.search(index=self._get_target_index(language), body=body)
 
         hits = response.get("hits", {})
         results = self._parse_hits(hits.get("hits", []))
@@ -310,7 +320,7 @@ class SearchService:
             ],
         }
 
-        response = self.client.search(index=self.INDEX, body=body)
+        response = self.client.search(index=self._get_target_index(language), body=body)
 
         hits = response.get("hits", {})
         results = self._parse_hits(hits.get("hits", []))
@@ -364,7 +374,7 @@ class SearchService:
             ],
         }
 
-        response = self.client.search(index=self.INDEX, body=body)
+        response = self.client.search(index=self._get_target_index(language), body=body)
 
         hits = response.get("hits", {})
         results = self._parse_hits(hits.get("hits", []))
@@ -458,7 +468,7 @@ class SearchService:
         rank_constant = rrf_rank_constant or self.RRF_RANK_CONSTANT
 
         # Get results from both methods
-        bm25_response = self.search_bm25(query, size=window_size)
+        bm25_response = self.search_bm25(query, size=window_size, language=language)
         try:
             knn_response = self.search_knn(query, size=window_size, language=language)
         except Exception as e:
@@ -554,10 +564,10 @@ class SearchService:
             SearchResponse with results
         """
         if mode == SearchMode.BM25:
-            return self.search_bm25(query, size=size)
+            return self.search_bm25(query, size=size, language=language)
         elif mode == SearchMode.KNN:
             return self.search_knn(query, size=size, language=language)
         elif mode == SearchMode.EXACT:
-            return self.search_exact(query, size=size)
+            return self.search_exact(query, size=size, language=language)
         else:
             return self.search_hybrid(query, size=size, language=language, **kwargs)

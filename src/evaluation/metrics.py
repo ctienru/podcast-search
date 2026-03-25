@@ -159,6 +159,7 @@ class NoAnnotationEvaluator:
         original_ids: Set[str],
         k: int,
         mode: SearchMode = SearchMode.HYBRID,
+        language: str = "en",
     ) -> float:
         """
         Calculate query perturbation stability
@@ -173,7 +174,7 @@ class NoAnnotationEvaluator:
         stability_scores = []
         for pq in perturbed_queries:
             try:
-                pq_response = self.search.search(pq, mode=mode, size=k)
+                pq_response = self.search.search(pq, mode=mode, size=k, language=language)
                 pq_ids = self._get_result_ids(pq_response.results)
                 sim = self._jaccard_similarity(original_ids, pq_ids)
                 stability_scores.append(sim)
@@ -193,6 +194,7 @@ class NoAnnotationEvaluator:
         k: int = 10,
         include_debug: bool = False,
         mode: SearchMode = SearchMode.HYBRID,
+        language: str = "en",
     ) -> EvaluationResult:
         """
         Evaluate search quality for a single query
@@ -207,7 +209,7 @@ class NoAnnotationEvaluator:
             EvaluationResult with 4 metrics
         """
         # Execute search using specified mode
-        response = self.search.search(query, mode=mode, size=k)
+        response = self.search.search(query, mode=mode, size=k, language=language)
         results = response.results
         result_ids = self._get_result_ids(results)
 
@@ -216,8 +218,8 @@ class NoAnnotationEvaluator:
         # Low overlap (<0.3) means BM25 and kNN capture different results — hybrid is worthwhile.
         # Returns 0.0 if kNN is unavailable (e.g. dimension mismatch on mixed-language index).
         try:
-            bm25_ids = self._get_result_ids(self.search.search_bm25(query, size=k).results)
-            knn_ids = self._get_result_ids(self.search.search_knn(query, size=k).results)
+            bm25_ids = self._get_result_ids(self.search.search_bm25(query, size=k, language=language).results)
+            knn_ids = self._get_result_ids(self.search.search_knn(query, size=k, language=language).results)
             top_k_overlap = self._jaccard_similarity(bm25_ids, knn_ids)
         except Exception as e:
             logger.debug(
@@ -233,7 +235,7 @@ class NoAnnotationEvaluator:
         intrusion, intrusion_episodes = self._calculate_extraneous_intrusion(results, k)
 
         # 4. Perturbation Stability
-        stability = self._calculate_perturbation_stability(query, result_ids, k, mode=mode)
+        stability = self._calculate_perturbation_stability(query, result_ids, k, mode=mode, language=language)
 
         result = EvaluationResult(
             query=query,

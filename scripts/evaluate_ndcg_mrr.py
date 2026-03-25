@@ -38,10 +38,11 @@ from src.utils.logging import setup_logging
 def _map_language(lang: str) -> Language:
     """Map query language labels to Language type used by search_knn().
 
-    test_queries.json uses 'zh' (undifferentiated Chinese), which maps to the
-    v1 zh-tw index. Update this mapping once language-split indices are in use.
+    test_queries.json now uses explicit language codes ('zh-tw', 'zh-cn', 'en').
+    'mixed' queries are routed to zh-tw as a fallback.
+    Unknown values pass through unchanged.
     """
-    return {"zh": "zh-tw", "mixed": "zh-tw"}.get(lang, lang)  # type: ignore[return-value]
+    return {"mixed": "zh-tw"}.get(lang, lang)  # type: ignore[return-value]
 
 logger = logging.getLogger(__name__)
 
