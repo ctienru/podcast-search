@@ -29,14 +29,20 @@ podcast-crawler
      │
      ├── SQLite (shows: language, target_index)
      │        │
-     │        └─────▶ ingest_shows.py ──────────────▶ ES shows
+     │        └─────▶ ingest_shows.py ──────────────────────────────▶ ES shows
      │
      └── raw/rss/*.xml
               │
               └─────▶ clean_episodes.py ─▶ data/cleaned/episodes/
                              │
-                             └─▶ embed_and_ingest.py ─▶ ES episodes-{lang}
-                                  (embed + route by language)
+                             ├─▶ embed_and_ingest.py ─────────────▶ ES episodes-{lang}
+                             │    (embed inline + route by language)
+                             │
+                             └─▶ embed_episodes.py ─▶ data/embeddings/
+                                  (Step 1: pre-compute vectors, no ES)
+                                        │
+                                        └─▶ embed_and_ingest --from-cache ─▶ ES episodes-{lang}
+                                             (Step 2: read cache, write ES)
 ```
 
 ## Project Structure
@@ -65,7 +71,9 @@ podcast-search/
 │   │   ├── create_indices.py    # Create 3 language indices + aliases
 │   │   ├── ingest_shows.py      # Shows: SQLite → ES shows index
 │   │   ├── clean_episodes.py    # RSS XML → cleaned JSON
-│   │   ├── embed_and_ingest.py  # Cleaned JSON → embedding → ES episodes
+│   │   ├── embed_episodes.py    # Cleaned JSON → embedding vectors → data/embeddings/ (no ES)
+│   │   ├── embed_and_ingest.py  # Cleaned JSON → embedding → ES episodes (or --from-cache)
+│   │   ├── exceptions.py        # Pipeline exceptions (CacheMissError)
 │   │   └── evaluate_search.py   # Search quality evaluation pipeline
 │   ├── embedding/
 │   │   └── backend.py           # EmbeddingBackend ABC, LocalEmbeddingBackend, APIEmbeddingBackend
@@ -144,7 +152,9 @@ Services:
 
 ```
 data/
-└── crawler.db                        # SQLite from podcast-crawler v2
+├── crawler.db                        # SQLite from podcast-crawler v2
+├── cleaned/episodes/                 # Cleaned episode JSON (output of clean_episodes)
+└── embeddings/                       # Pre-computed embedding vectors (output of embed_episodes)
 ../podcast-crawler/data/raw/rss/      # RSS XML files (shared with crawler)
 ```
 
@@ -162,8 +172,12 @@ python -m src.pipelines.ingest_shows
 # Step 3 — Clean episodes: RSS XML → data/cleaned/episodes/
 python -m src.pipelines.clean_episodes
 
-# Step 4 — Embed and ingest all episodes (full mode, re-embeds everything)
+# Step 4a — Embed and ingest inline (single step, requires local GPU/model)
 SYNC_MODE=full python -m src.pipelines.embed_and_ingest
+
+# Step 4b — Two-step: pre-compute vectors locally, then write to remote ES
+python -m src.pipelines.embed_episodes          # slow, local; writes data/embeddings/
+ES_HOST=<remote> SYNC_MODE=full python -m src.pipelines.embed_and_ingest --from-cache
 ```
 
 ### 5. Verify
@@ -182,13 +196,28 @@ GET shows/_count
 
 ### Daily incremental sync (default)
 
-`embed_and_ingest.py` 會依 `data/ingest_cursor.json` 做增量；`ingest_shows.py` 目前仍為全量同步（尚未 cursor 化）。
+`embed_and_ingest.py` uses `data/ingest_cursor.json` for incremental sync. `ingest_shows.py` is still full-sync (no cursor yet).
 
 ```bash
 python -m src.pipelines.ingest_shows
 python -m src.pipelines.clean_episodes
 python -m src.pipelines.embed_and_ingest
 # SYNC_MODE defaults to "incremental" (for embed_and_ingest)
+```
+
+### Two-step workflow (decouple embedding from ES)
+
+Use when the embedding model runs locally but ES is remote. Step 1 computes vectors offline; Step 2 only touches the network.
+
+```bash
+# Step 1 (local, slow): compute vectors and cache to data/embeddings/
+python -m src.pipelines.embed_episodes
+
+# Step 2 (fast, remote ES): read cache, write to ES
+ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache
+
+# Strict mode: fail immediately if any episode is missing from the cache
+ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache --strict-cache
 ```
 
 ### Backfill a newly added non-analyzer field
@@ -250,7 +279,7 @@ The service exposes two endpoints used by `podcast-backend`:
 # Embed a query
 curl -X POST http://localhost:8000/embed \
   -H "Content-Type: application/json" \
-  -d '{"texts": ["人工智慧"], "language": "zh-tw"}'
+  -d '{"texts": ["artificial intelligence"], "language": "zh-tw"}'
 ```
 
 ## Environment Variables
@@ -268,6 +297,7 @@ curl -X POST http://localhost:8000/embed \
 | `CLICK_LOG_PATH` | `logs/click_log.jsonl` | Click behavioral log |
 | `INGEST_CURSOR_PATH` | `data/ingest_cursor.json` | Incremental ingest cursor |
 | `ENABLE_LANGUAGE_SPLIT` | `true` | Use 3-index language-split layout (v2 default) |
+| `EMBEDDING_CACHE_DIR` | `data/embeddings` | Vector cache dir (written by `embed_episodes`, read by `embed_and_ingest --from-cache`) |
 | `EMBEDDING_API_URL` | — | External embedding API URL (Phase 3-B) |
 | `EMBEDDING_API_KEY` | — | External embedding API key (Phase 3-B) |
 
@@ -335,9 +365,9 @@ Episode document:
 |----------|---------|-------|
 | Index-time (zh-tw, zh-cn) | `LocalEmbeddingBackend` | `BAAI/bge-base-zh-v1.5` (768 dim) |
 | Index-time (en) | `LocalEmbeddingBackend` | `paraphrase-multilingual-MiniLM-L12-v2` (384 dim) |
-| Query-time | `/embed` 由 `EMBEDDING_STRATEGY` 決定（`local` 或 `api`） | 與 backend 選擇一致 |
+| Query-time | `APIEmbeddingBackend` (`/embed` endpoint) | Must match index-time model |
 
-`create_backend()` 目前以 `EMBEDDING_STRATEGY` 環境變數決定使用 `LocalEmbeddingBackend` 或 `APIEmbeddingBackend`；沒有依 LRU hit rate 自動切換 backend 的機制。
+Index-time uses `LocalEmbeddingBackend` (language-to-model mapping defined in `MODEL_MAP`). Query-time goes through the `/embed` endpoint backed by `APIEmbeddingBackend`, which is lazy-loaded on first request and shared for the process lifetime. Index-time and query-time must use the same model — mixing backends produces incomparable vector spaces and silently degrades kNN quality.
 
 ## Search Evaluation
 
