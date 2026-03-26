@@ -51,3 +51,8 @@ INGEST_CURSOR_PATH: Path = Path(os.getenv("INGEST_CURSOR_PATH", "data/ingest_cur
 
 # v2: Local embedding vector cache (written by embed_episodes, read by embed_and_ingest --from-cache)
 EMBEDDING_CACHE_DIR: Path = Path(os.getenv("EMBEDDING_CACHE_DIR", "data/embeddings"))
+
+# Embedding version: encodes both model and text assembly rules.
+# Bump text-vN when the text passed to the encoder changes (e.g. new fields, new template).
+# Used in cache JSON as "{model_name}/{EMBEDDING_TEXT_VERSION}".
+EMBEDDING_TEXT_VERSION: str = os.getenv("EMBEDDING_TEXT_VERSION", "text-v1")
