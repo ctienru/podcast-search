@@ -28,9 +28,11 @@ class IngestShowsPipeline:
         self,
         es_service: Optional[ElasticsearchService] = None,
         storage: Optional[StorageBase] = None,
+        sync_repo=None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.storage = storage or create_storage()
+        self.sync_repo = sync_repo
 
     # ---------- load ----------
 
@@ -152,8 +154,9 @@ class IngestShowsPipeline:
 
     # ---------- orchestration ----------
 
-    def run(self) -> None:
-        shows = list(self.load_shows())
+    def run(self, shows: Optional[list] = None) -> None:
+        if shows is None:
+            shows = list(self.load_shows())
         logger.info(
             "shows_loaded",
             extra={"count": len(shows)},
@@ -182,6 +185,22 @@ class IngestShowsPipeline:
                 "show_ingest_errors_sample",
                 extra={"sample": errors[:5]},
             )
+
+        if self.sync_repo is not None:
+            error_ids = {
+                e.get("index", {}).get("_id")
+                for e in errors
+            }
+            for show in shows:
+                show_id = show.get("show_id") if isinstance(show, dict) else show["show_id"]
+                if show_id not in error_ids:
+                    self.sync_repo.mark_done(
+                        entity_type="show",
+                        entity_id=show_id,
+                        index_alias=self.INDEX_ALIAS,
+                        content_hash=show.get("content_hash") if isinstance(show, dict) else None,
+                        source_updated_at=show.get("updated_at") if isinstance(show, dict) else None,
+                    )
 
 
 def run() -> None:
