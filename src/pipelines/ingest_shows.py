@@ -1,8 +1,10 @@
 import logging
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from elasticsearch import helpers
+from sqlite_utils import Database
 
+from src.config import settings
 from src.services.es_service import ElasticsearchService
 from src.storage.base import StorageBase
 from src.storage.factory import create_storage
@@ -38,7 +40,7 @@ class IngestShowsPipeline:
     # ---------- load ----------
 
     @staticmethod
-    def _show_to_dict(show: Show) -> Dict:
+    def _show_to_dict(show: Show) -> Dict[str, Any]:
         """Convert Show dataclass to a dict for to_es_doc().
 
         Adapts the flat Show fields to the nested structure to_es_doc() expects:
@@ -64,7 +66,7 @@ class IngestShowsPipeline:
             "categories": list(show.categories),
         }
 
-    def load_shows(self) -> Iterable[Dict]:
+    def load_shows(self) -> Iterable[Dict[str, Any]]:
         """Load all canonical shows from SQLiteStorage.
 
         Reads Show dataclasses via get_shows() and converts them to dicts
@@ -75,7 +77,7 @@ class IngestShowsPipeline:
 
     # ---------- transform ----------
 
-    def to_es_doc(self, show: Dict) -> Dict:
+    def to_es_doc(self, show: Mapping[str, Any]) -> Dict[str, Any]:
         """
         Project canonical show into Elasticsearch document
         according to shows mapping.
@@ -143,10 +145,13 @@ class IngestShowsPipeline:
 
     # ---------- bulk ----------
 
-    def build_actions(self, shows: Iterable[Dict]):
+    def build_actions(self, shows: Iterable[Mapping[str, Any]], built_ids: Optional[set[str]] = None):
         for show in shows:
             try:
-                yield self.to_es_doc(show)
+                action = self.to_es_doc(show)
+                if built_ids is not None:
+                    built_ids.add(action["_id"])
+                yield action
             except Exception:
                 logger.exception(
                     "build_show_doc_failed",
@@ -155,9 +160,11 @@ class IngestShowsPipeline:
 
     # ---------- orchestration ----------
 
-    def run(self, shows: Optional[list] = None) -> None:
+    def run(self, shows: Optional[Sequence[Mapping[str, Any]]] = None) -> None:
         if shows is None:
             shows = list(self.load_shows())
+        else:
+            shows = list(shows)
         logger.info(
             "shows_loaded",
             extra={"count": len(shows)},
@@ -167,9 +174,11 @@ class IngestShowsPipeline:
             logger.warning("no_shows_to_ingest")
             return
 
+        built_ids: set[str] = set()
+        actions = list(self.build_actions(shows, built_ids=built_ids))
         success, errors = helpers.bulk(
             self.es.client,
-            self.build_actions(shows),
+            actions,
             raise_on_error=False,
         )
 
@@ -193,14 +202,14 @@ class IngestShowsPipeline:
                 for e in errors
             }
             for show in shows:
-                show_id = show.get("show_id") if isinstance(show, dict) else show["show_id"]
-                if show_id not in error_ids:
+                show_id = show.get("show_id")
+                if show_id in built_ids and show_id not in error_ids:
                     self.sync_repo.mark_done(
                         entity_type="show",
                         entity_id=show_id,
                         index_alias=self.INDEX_ALIAS,
-                        content_hash=show.get("content_hash") if isinstance(show, dict) else None,
-                        source_updated_at=show.get("updated_at") if isinstance(show, dict) else None,
+                        content_hash=show.get("content_hash"),
+                        source_updated_at=show.get("updated_at"),
                     )
 
 
@@ -210,7 +219,8 @@ def run() -> None:
     logging.getLogger("elastic_transport").setLevel(logging.WARNING)
     logging.getLogger("elasticsearch").setLevel(logging.WARNING)
 
-    IngestShowsPipeline().run()
+    sync_repo = SyncStateRepository(Database(settings.SQLITE_PATH))
+    IngestShowsPipeline(sync_repo=sync_repo).run()
 
 
 if __name__ == "__main__":

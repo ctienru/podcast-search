@@ -1,11 +1,10 @@
 """Sync state writer for podcast-search.
 
 Writes to the search_sync_state table in crawler.db after successful ES ingest.
-The table is created by podcast-crawler's _ensure_schema(); this class assumes
-it already exists (crawler always runs before search).
-
-For safety, CREATE TABLE IF NOT EXISTS is also run on first use so the search
-side can work even if crawler hasn't been run yet.
+The table is normally created by podcast-crawler's _ensure_schema(), but this
+class also ensures it exists by running CREATE TABLE IF NOT EXISTS on first use.
+This create-if-missing behavior allows the search side to work even if crawler
+has not been run yet.
 """
 
 from datetime import datetime, timezone

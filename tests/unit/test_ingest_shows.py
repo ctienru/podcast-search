@@ -73,3 +73,22 @@ class TestIngestShowsSyncState:
             mock_helpers.bulk.return_value = (1, [])
             pipeline.run(shows=[show])
             mock_helpers.bulk.assert_called_once()
+
+    def test_mark_done_skips_show_when_build_action_failed(self, es_service):
+        bad_show = _make_show_dict("show:apple:bad")
+        bad_show.pop("show_id")
+        good_show = _make_show_dict("show:apple:good")
+        sync_repo = MagicMock()
+        pipeline = IngestShowsPipeline(es_service=es_service, storage=MagicMock(), sync_repo=sync_repo)
+
+        with patch("src.pipelines.ingest_shows.helpers") as mock_helpers:
+            mock_helpers.bulk.return_value = (1, [])
+            pipeline.run(shows=[bad_show, good_show])
+
+        sync_repo.mark_done.assert_called_once_with(
+            entity_type="show",
+            entity_id="show:apple:good",
+            index_alias=IngestShowsPipeline.INDEX_ALIAS,
+            content_hash="abc123",
+            source_updated_at="2026-01-01T00:00:00Z",
+        )
