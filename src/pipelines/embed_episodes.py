@@ -17,6 +17,7 @@ Cache format:
         "show_id": "<show_id>",
         "model_key": "zh" | "en",
         "model_name": "<HuggingFace model id>",
+        "embedding_version": "<model_name>/<EMBEDDING_TEXT_VERSION>",
         "embedded_at": "<ISO timestamp>",
         "episodes": {
             "<episode_id>": [<float>, ...]
@@ -185,10 +186,15 @@ def run(
         model_name = MODEL_MAP[model_key]
 
         # Load existing cache (if valid) and find which episodes are missing.
+        embedding_version = f"{model_name}/{settings.EMBEDDING_TEXT_VERSION}"
         existing_episodes: Dict[str, list] = {}
         if not force:
             existing = _load_existing_cache(out_path)
-            if existing and existing.get("model_name") == model_name:
+            if (
+                existing
+                and existing.get("model_name") == model_name
+                and existing.get("embedding_version") == embedding_version
+            ):
                 existing_episodes = existing.get("episodes", {})
 
         cached_ids = set(existing_episodes)
@@ -240,6 +246,7 @@ def run(
             "show_id": show_id,
             "model_key": model_key,
             "model_name": model_name,
+            "embedding_version": embedding_version,
             "embedded_at": datetime.now(timezone.utc).isoformat(),
             "episodes": merged_episodes,
         }

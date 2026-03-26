@@ -8,6 +8,7 @@ import pytest
 
 import src.pipelines.embed_episodes as embed_ep
 from src.pipelines.embed_episodes import run
+from src.config import settings
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -41,12 +42,21 @@ def _write_cleaned_episode(
     (directory / f"{episode_id}.json").write_text(json.dumps(data), encoding="utf-8")
 
 
-def _write_cache(cache_dir: Path, show_id: str, episode_ids: list[str], model_name: str = ZH_MODEL) -> None:
+def _write_cache(
+    cache_dir: Path,
+    show_id: str,
+    episode_ids: list[str],
+    model_name: str = ZH_MODEL,
+    embedding_version: str | None = None,
+) -> None:
+    """Write a cache file. embedding_version defaults to the current settings value."""
     cache_dir.mkdir(parents=True, exist_ok=True)
+    version = embedding_version if embedding_version is not None else f"{model_name}/{settings.EMBEDDING_TEXT_VERSION}"
     entry = {
         "show_id": show_id,
         "model_key": "zh",
         "model_name": model_name,
+        "embedding_version": version,
         "embedded_at": "2026-03-26T00:00:00+00:00",
         "episodes": {ep_id: FAKE_VEC for ep_id in episode_ids},
     }
@@ -222,3 +232,39 @@ def test_missing_language_counts_as_failed(tmp_path: Path) -> None:
     assert stats["failed"] > 0
     assert stats["written"] == 0
     mock_backend.embed_batch.assert_not_called()
+
+
+def test_embedding_version_mismatch_triggers_full_reembed(tmp_path: Path) -> None:
+    """Cache exists with outdated embedding_version → all episodes re-embedded."""
+    p_input, p_cleaned, ei_dir, cl_dir = _patch_dirs(tmp_path)
+    cache_dir = tmp_path / "embeddings"
+    mock_backend = _mock_backend()
+
+    with p_input, p_cleaned, patch("src.pipelines.embed_episodes.LocalEmbeddingBackend", return_value=mock_backend):
+        _write_embedding_input(ei_dir, "ep-1", "show-A")
+        _write_cleaned_episode(cl_dir, "ep-1", "show-A")
+        # Cache has correct model_name but a stale text version.
+        _write_cache(cache_dir, "show-A", ["ep-1"], embedding_version=f"{ZH_MODEL}/text-v0")
+
+        stats = run(cache_dir=cache_dir)
+
+    assert stats["written"] == 1
+    assert stats["skipped"] == 0
+    mock_backend.embed_batch.assert_called_once()
+
+
+def test_written_cache_contains_embedding_version(tmp_path: Path) -> None:
+    """Newly written cache JSON must include embedding_version field."""
+    p_input, p_cleaned, ei_dir, cl_dir = _patch_dirs(tmp_path)
+    cache_dir = tmp_path / "embeddings"
+    mock_backend = _mock_backend()
+
+    with p_input, p_cleaned, patch("src.pipelines.embed_episodes.LocalEmbeddingBackend", return_value=mock_backend):
+        _write_embedding_input(ei_dir, "ep-1", "show-A")
+        _write_cleaned_episode(cl_dir, "ep-1", "show-A")
+
+        run(cache_dir=cache_dir)
+
+    cached = _read_cache(cache_dir, "show-A")
+    expected_version = f"{ZH_MODEL}/{settings.EMBEDDING_TEXT_VERSION}"
+    assert cached["embedding_version"] == expected_version
