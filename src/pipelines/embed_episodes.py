@@ -17,6 +17,7 @@ Cache format:
         "show_id": "<show_id>",
         "model_key": "zh" | "en",
         "model_name": "<HuggingFace model id>",
+        "embedding_version": "<model_name>/<EMBEDDING_TEXT_VERSION>",
         "embedded_at": "<ISO timestamp>",
         "episodes": {
             "<episode_id>": [<float>, ...]
