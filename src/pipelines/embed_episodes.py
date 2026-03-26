@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from src.config import settings
-from src.embedding.backend import LocalEmbeddingBackend, _MODEL_MAP
+from src.embedding.backend import LocalEmbeddingBackend, MODEL_MAP
 from src.types import Language
 from src.utils.logging import setup_logging
 
@@ -182,7 +182,7 @@ def run(
             continue
 
         model_key = _model_key_for_language(lang)
-        model_name = _MODEL_MAP[model_key]
+        model_name = MODEL_MAP[model_key]
 
         # Load existing cache (if valid) and find which episodes are missing.
         existing_episodes: Dict[str, list] = {}

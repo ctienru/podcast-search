@@ -19,7 +19,7 @@ router = APIRouter()
 # Lazy-loaded backend (initialised on first request, shared for process lifetime)
 _backend: EmbeddingBackend | None = None
 
-# Model names reported in responses — kept in sync with backend._MODEL_MAP
+# Model names reported in responses — kept in sync with backend.MODEL_MAP
 _LANGUAGE_TO_MODEL: dict[str, str] = {
     "zh-tw": "BAAI/bge-base-zh-v1.5",
     "zh-cn": "BAAI/bge-base-zh-v1.5",

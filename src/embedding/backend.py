@@ -22,7 +22,7 @@ from src.types import Language
 
 logger = logging.getLogger(__name__)
 
-_MODEL_MAP: dict[str, str] = {
+MODEL_MAP: dict[str, str] = {
     "zh": "BAAI/bge-base-zh-v1.5",                    # 768 dim, zh-tw + zh-cn
     "en": "paraphrase-multilingual-MiniLM-L12-v2",    # 384 dim
 }
@@ -110,7 +110,7 @@ class LocalEmbeddingBackend(EmbeddingBackend):
         Returns:
             Normalised embedding vector as list[float].
         """
-        model = _load_model(_MODEL_MAP[self._model_key(language)])
+        model = _load_model(MODEL_MAP[self._model_key(language)])
         return model.encode(text, normalize_embeddings=True).tolist()
 
     def embed_batch(self, texts: list[str], language: Language) -> list[list[float]]:
@@ -126,7 +126,7 @@ class LocalEmbeddingBackend(EmbeddingBackend):
         Returns:
             List of embedding vectors in the same order as texts.
         """
-        model = _load_model(_MODEL_MAP[self._model_key(language)])
+        model = _load_model(MODEL_MAP[self._model_key(language)])
         return model.encode(texts, normalize_embeddings=True).tolist()
 
 

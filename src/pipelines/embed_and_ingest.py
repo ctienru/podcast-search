@@ -900,6 +900,9 @@ def run() -> None:
     )
     args = parser.parse_args()
 
+    if args.strict_cache and not args.from_cache:
+        raise SystemExit("--strict-cache requires --from-cache")
+
     setup_logging()
 
     mode = settings.SYNC_MODE
