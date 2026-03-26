@@ -48,3 +48,6 @@ INDEX_EN: str = os.getenv("INDEX_EN", "episodes-en")
 QUERY_LOG_PATH: Path = Path(os.getenv("QUERY_LOG_PATH", "logs/query_log.jsonl"))
 CLICK_LOG_PATH: Path = Path(os.getenv("CLICK_LOG_PATH", "logs/click_log.jsonl"))
 INGEST_CURSOR_PATH: Path = Path(os.getenv("INGEST_CURSOR_PATH", "data/ingest_cursor.json"))
+
+# v2: Local embedding vector cache (written by embed_episodes, read by embed_and_ingest --from-cache)
+EMBEDDING_CACHE_DIR: Path = Path(os.getenv("EMBEDDING_CACHE_DIR", "data/embeddings"))

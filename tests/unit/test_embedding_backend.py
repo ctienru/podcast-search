@@ -18,7 +18,7 @@ from src.embedding.backend import (
     EmbeddingBackend,
     EmbeddingFallbackError,
     LocalEmbeddingBackend,
-    _MODEL_MAP,
+    MODEL_MAP,
     embed_query_cached,
 )
 
@@ -41,7 +41,7 @@ class TestLocalEmbeddingBackend:
             backend = LocalEmbeddingBackend()
             backend.embed("podcast title", "zh-tw")
 
-        mock_load.assert_called_once_with(_MODEL_MAP["zh"])
+        mock_load.assert_called_once_with(MODEL_MAP["zh"])
 
     def test_zh_cn_uses_same_model_as_zh_tw(self) -> None:
         """zh-cn and zh-tw must share the same underlying model."""
@@ -99,7 +99,7 @@ class TestLocalEmbeddingBackend:
             backend = LocalEmbeddingBackend()
             backend.embed_batch(["text"], "zh-tw")
 
-        mock_load.assert_called_once_with(_MODEL_MAP["zh"])
+        mock_load.assert_called_once_with(MODEL_MAP["zh"])
 
     def test_embed_batch_passes_list_to_model_encode(self) -> None:
         """embed_batch must call model.encode with the full list (batch efficiency)."""
