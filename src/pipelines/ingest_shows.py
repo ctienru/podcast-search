@@ -6,6 +6,7 @@ from elasticsearch import helpers
 from src.services.es_service import ElasticsearchService
 from src.storage.base import StorageBase
 from src.storage.factory import create_storage
+from src.storage.sync_state import SyncStateRepository
 from src.types import Show
 from src.utils.logging import setup_logging
 
@@ -28,7 +29,7 @@ class IngestShowsPipeline:
         self,
         es_service: Optional[ElasticsearchService] = None,
         storage: Optional[StorageBase] = None,
-        sync_repo=None,
+        sync_repo: Optional[SyncStateRepository] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.storage = storage or create_storage()

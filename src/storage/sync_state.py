@@ -9,7 +9,6 @@ side can work even if crawler hasn't been run yet.
 """
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from sqlite_utils import Database
@@ -29,8 +28,8 @@ class SyncStateRepository:
         self._ensure_table()
 
     def _ensure_table(self) -> None:
-        self._db.execute("""
-            CREATE TABLE IF NOT EXISTS search_sync_state (
+        self._db.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self._TABLE} (
               entity_type       TEXT NOT NULL,
               entity_id         TEXT NOT NULL,
               index_alias       TEXT,
@@ -46,6 +45,14 @@ class SyncStateRepository:
               PRIMARY KEY (entity_type, entity_id)
             )
         """)
+        self._db.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{self._TABLE}_sync_status
+            ON {self._TABLE} (sync_status)
+        """)
+        self._db.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{self._TABLE}_entity_type
+            ON {self._TABLE} (entity_type)
+        """)
 
     def mark_done(
         self,
@@ -59,8 +66,8 @@ class SyncStateRepository:
         """Record a successful ES sync."""
         now = _utc_now_iso()
         self._db.execute(
-            """
-            INSERT INTO search_sync_state
+            f"""
+            INSERT INTO {self._TABLE}
               (entity_type, entity_id, index_alias, content_hash, source_updated_at,
                embedding_model, sync_status, last_synced_at, last_error)
             VALUES (?, ?, ?, ?, ?, ?, 'synced', ?, NULL)
