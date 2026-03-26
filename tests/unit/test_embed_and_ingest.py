@@ -381,6 +381,45 @@ class TestBatchEncode:
         assert vec == []
 
 
+class TestBatchEncodeFromCache:
+    def test_returns_vector_from_cache(self) -> None:
+        """from_cache=True: episode in _vector_cache → cached vector returned, backend not called."""
+        pipeline = EmbedAndIngestPipeline(
+            es_service=MagicMock(),
+            embedding_backend=None,
+            routing_strategy=LanguageSplitRoutingStrategy(),
+            storage=MagicMock(),
+            from_cache=True,
+        )
+        pipeline._vector_cache["ep-cached"] = [0.5] * 768
+
+        inputs = [_make_embedding_input("ep-cached", "show-1", "some text")]
+        results = pipeline.batch_encode(inputs)
+
+        assert len(results) == 1
+        inp, vec = results[0]
+        assert inp["episode_id"] == "ep-cached"
+        assert vec == [0.5] * 768
+
+    def test_cache_miss_returns_empty_vector(self) -> None:
+        """from_cache=True: episode not in _vector_cache → empty vector (BM25-only update path)."""
+        pipeline = EmbedAndIngestPipeline(
+            es_service=MagicMock(),
+            embedding_backend=None,
+            routing_strategy=LanguageSplitRoutingStrategy(),
+            storage=MagicMock(),
+            from_cache=True,
+        )
+        # _vector_cache is empty — simulate forgetting to run embed_episodes
+
+        inputs = [_make_embedding_input("ep-missing", "show-1", "some text")]
+        results = pipeline.batch_encode(inputs)
+
+        assert len(results) == 1
+        _, vec = results[0]
+        assert vec == []
+
+
 # ── load_cursor / save_cursor ─────────────────────────────────────────────────
 
 
@@ -572,3 +611,100 @@ class TestUpsertByShowId:
         call_kwargs = MockPipeline.call_args.kwargs
         assert call_kwargs["allowed_show_ids"] == {"s1"}
         assert count == 3
+
+
+# ── strict_cache mode ─────────────────────────────────────────────────────────
+
+
+class TestStrictCache:
+    def _make_pipeline(self, strict_cache: bool = True) -> EmbedAndIngestPipeline:
+        return EmbedAndIngestPipeline(
+            es_service=MagicMock(),
+            embedding_backend=None,
+            routing_strategy=LanguageSplitRoutingStrategy(),
+            storage=MagicMock(),
+            from_cache=True,
+            strict_cache=strict_cache,
+        )
+
+    def test_strict_cache_raises_on_cache_miss(self) -> None:
+        """strict_cache=True: if any episode has a cache miss, raise CacheMissError."""
+        from src.pipelines.exceptions import CacheMissError
+        pipeline = self._make_pipeline(strict_cache=True)
+        # _vector_cache is empty — every lookup will be a miss
+
+        inputs = [
+            _make_embedding_input("ep-1", "show-1", "text one"),
+            _make_embedding_input("ep-2", "show-1", "text two"),
+        ]
+
+        with pytest.raises(CacheMissError, match="2"):
+            pipeline.batch_encode(inputs)
+
+    def test_strict_cache_raises_with_partial_miss(self) -> None:
+        """strict_cache=True: even a single miss should raise."""
+        from src.pipelines.exceptions import CacheMissError
+        pipeline = self._make_pipeline(strict_cache=True)
+        pipeline._vector_cache["ep-hit"] = [0.1] * 768
+        # ep-miss has no cache entry
+
+        inputs = [
+            _make_embedding_input("ep-hit", "show-1", "text one"),
+            _make_embedding_input("ep-miss", "show-1", "text two"),
+        ]
+
+        with pytest.raises(CacheMissError, match="1"):
+            pipeline.batch_encode(inputs)
+
+    def test_non_strict_cache_miss_returns_empty_vector(self) -> None:
+        """strict_cache=False (default): cache miss returns empty vector, no exception."""
+        pipeline = self._make_pipeline(strict_cache=False)
+        # _vector_cache is empty
+
+        inputs = [_make_embedding_input("ep-missing", "show-1", "text")]
+        results = pipeline.batch_encode(inputs)
+
+        assert len(results) == 1
+        _, vec = results[0]
+        assert vec == []
+
+    def test_strict_cache_no_raise_when_all_hits(self) -> None:
+        """strict_cache=True: no exception when all episodes have cache entries."""
+        from src.pipelines.exceptions import CacheMissError
+        pipeline = self._make_pipeline(strict_cache=True)
+        pipeline._vector_cache["ep-1"] = [0.5] * 768
+        pipeline._vector_cache["ep-2"] = [0.3] * 768
+
+        inputs = [
+            _make_embedding_input("ep-1", "show-1", "text one"),
+            _make_embedding_input("ep-2", "show-1", "text two"),
+        ]
+
+        results = pipeline.batch_encode(inputs)
+        assert len(results) == 2
+
+
+# ── run summary ───────────────────────────────────────────────────────────────
+
+
+class TestRunSummary:
+    def test_run_returns_cache_hit_and_miss_counts(self) -> None:
+        """run() stats dict must include cache_hits and cache_misses when from_cache=True."""
+        pipeline = EmbedAndIngestPipeline(
+            es_service=MagicMock(),
+            embedding_backend=None,
+            routing_strategy=LanguageSplitRoutingStrategy(),
+            storage=MagicMock(),
+            from_cache=True,
+        )
+        pipeline._vector_cache["ep-1"] = [0.5] * 768
+        # ep-2 will be a miss
+
+        inputs = [
+            _make_embedding_input("ep-1", "show-1", "text one"),
+            _make_embedding_input("ep-2", "show-1", "text two"),
+        ]
+        results = pipeline.batch_encode(inputs)
+
+        assert pipeline._cache_hits == 1
+        assert pipeline._cache_misses == 1

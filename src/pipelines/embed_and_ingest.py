@@ -29,6 +29,7 @@ from elasticsearch.helpers import streaming_bulk
 
 from src.config import settings
 from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
+from src.pipelines.exceptions import CacheMissError
 from src.search.routing import IndexRoutingStrategy, LanguageSplitRoutingStrategy
 from src.services.es_service import ElasticsearchService
 from src.storage.base import StorageBase
@@ -106,6 +107,9 @@ class EmbedAndIngestPipeline:
         storage: Optional[StorageBase] = None,
         routing_strategy: Optional[IndexRoutingStrategy] = None,
         allowed_show_ids: Optional[set[str]] = None,
+        from_cache: bool = False,
+        cache_dir: Optional[Path] = None,
+        strict_cache: bool = False,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.batch_size = batch_size  # default raised to 64 for better GPU/MPS utilisation
@@ -116,14 +120,23 @@ class EmbedAndIngestPipeline:
         )
         self.allowed_show_ids = allowed_show_ids  # None = process all shows
         self._embedding_backend = embedding_backend  # None = BM25-only mode
+        self._from_cache = from_cache
+        self._cache_dir = cache_dir or settings.EMBEDDING_CACHE_DIR
+        self._strict_cache = strict_cache
 
         # Caches
         self._show_cache: Dict[str, Dict] = {}
         self._cleaned_episode_cache: Dict[str, Dict] = {}
+        # episode_id → vector, populated when from_cache=True
+        self._vector_cache: Dict[str, list] = {}
 
         # Ingest tracking (populated during build_actions)
         self._index_counts: Dict[str, int] = defaultdict(int)
         self._language_distribution: Dict[str, int] = defaultdict(int)
+
+        # Cache hit/miss counters (populated during batch_encode when from_cache=True)
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
 
     def _load_show_cache(self) -> None:
         """Pre-load show data from SQLiteStorage into memory.
@@ -179,6 +192,53 @@ class EmbedAndIngestPipeline:
                     loaded += 1
 
         logger.debug("cleaned_episode_cache_loaded", extra={"count": loaded})
+
+    def _load_vector_cache(self) -> None:
+        """Load pre-computed embedding vectors from disk (used with from_cache=True).
+
+        Reads data/embeddings/<show_id>.json files and populates self._vector_cache.
+        Shows whose cache file is missing are logged as warnings; their episodes will
+        be ingested without a vector (BM25-only update path in to_es_doc).
+        """
+        if not self._cache_dir.exists():
+            logger.warning("embedding_cache_dir_not_found", extra={"path": str(self._cache_dir)})
+            return
+
+        loaded_episodes = 0
+        missing_shows = 0
+        show_ids = (
+            self.allowed_show_ids
+            if self.allowed_show_ids is not None
+            else {
+                ep.get("show_id")
+                for ep in self._cleaned_episode_cache.values()
+                if ep.get("show_id")
+            }
+        )
+
+        for show_id in show_ids:
+            cache_file = self._cache_dir / f"{show_id}.json"
+            if not cache_file.exists():
+                logger.warning("embedding_cache_missing", extra={"show_id": show_id})
+                missing_shows += 1
+                continue
+            try:
+                with open(cache_file, encoding="utf-8") as f:
+                    entry = json.load(f)
+                for episode_id, vector in entry.get("episodes", {}).items():
+                    self._vector_cache[episode_id] = vector
+                    loaded_episodes += 1
+            except Exception as e:
+                logger.warning(
+                    "embedding_cache_load_failed",
+                    extra={"show_id": show_id, "error": str(e)},
+                )
+                missing_shows += 1
+
+        logger.info(
+            "vector_cache_loaded",
+            extra={"episodes": loaded_episodes, "missing_shows": missing_shows},
+        )
 
     def _get_show_data(self, show_id: str) -> Optional[Dict]:
         """Get show data from cache."""
@@ -259,6 +319,28 @@ class EmbedAndIngestPipeline:
             the inputs. Vectors are [] for items with unknown language or when
             embedding_backend is None (BM25-only mode).
         """
+        if self._from_cache:
+            result = []
+            miss_count = 0
+            for inp in inputs:
+                episode_id = inp.get("episode_id", "")
+                vec = self._vector_cache.get(episode_id, [])
+                if vec:
+                    self._cache_hits += 1
+                else:
+                    miss_count += 1
+                    self._cache_misses += 1
+                    logger.debug(
+                        "vector_cache_miss",
+                        extra={"episode_id": episode_id},
+                    )
+                result.append((inp, vec))
+            if miss_count > 0 and self._strict_cache:
+                raise CacheMissError(
+                    f"{miss_count} cache miss(es) in strict-cache mode"
+                )
+            return result
+
         if self._embedding_backend is None:
             return [(inp, []) for inp in inputs]
 
@@ -459,6 +541,8 @@ class EmbedAndIngestPipeline:
         # Load caches
         self._load_show_cache()
         self._load_cleaned_episode_cache()
+        if self._from_cache:
+            self._load_vector_cache()
 
         # Count files
         files = self.list_embedding_input_files()
@@ -519,7 +603,14 @@ class EmbedAndIngestPipeline:
             "total": total_count,
             "elapsed_sec": round(elapsed, 2),
             "docs_per_sec": round(success / elapsed, 2) if elapsed > 0 else 0,
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
         }
+        if self._cache_misses > 0:
+            logger.warning(
+                "cache_miss_warning",
+                extra={"cache_misses": self._cache_misses},
+            )
 
         logger.info("pipeline_complete", extra=stats)
 
@@ -582,6 +673,9 @@ def run_incremental(
     batch_size: int = 64,
     dry_run: bool = False,
     allowed_show_ids: Optional[set[str]] = None,
+    from_cache: bool = False,
+    cache_dir: Optional[Path] = None,
+    strict_cache: bool = False,
 ) -> dict:
     """Run ingest in incremental mode: only shows updated since the last run.
 
@@ -644,6 +738,9 @@ def run_incremental(
         allowed_show_ids=_allowed_show_ids,
         batch_size=batch_size,
         dry_run=dry_run,
+        from_cache=from_cache,
+        cache_dir=cache_dir,
+        strict_cache=strict_cache,
     )
     stats = pipeline.run()
 
@@ -789,12 +886,25 @@ def run() -> None:
     parser.add_argument("--force-full", action="store_true", help="Ignore cursor, process all shows")
     parser.add_argument("--show-id", type=str, help="Show ID for single-show upsert (SYNC_MODE=single)")
     parser.add_argument("--show-ids", nargs="+", metavar="SHOW_ID", help="One or more show IDs to process (incremental/full modes)")
+    parser.add_argument(
+        "--from-cache",
+        action="store_true",
+        help="Read embedding vectors from data/embeddings/ instead of computing them. "
+             "Run embed_episodes first to populate the cache.",
+    )
+    parser.add_argument(
+        "--strict-cache",
+        action="store_true",
+        help="Fail if any episode is missing from the vector cache (requires --from-cache). "
+             "Use in CI or backfill to ensure all episodes have been pre-embedded.",
+    )
     args = parser.parse_args()
 
     setup_logging()
 
     mode = settings.SYNC_MODE
-    backend = LocalEmbeddingBackend()
+    # --from-cache: skip embedding entirely; vectors come from disk cache.
+    backend: Optional[EmbeddingBackend] = None if args.from_cache else LocalEmbeddingBackend()
 
     if mode == "single":
         if not args.show_id:
@@ -822,6 +932,8 @@ def run() -> None:
             batch_size=args.batch_size,
             dry_run=args.dry_run,
             allowed_show_ids=show_ids_filter,
+            from_cache=args.from_cache,
+            strict_cache=args.strict_cache,
         )
 
 
