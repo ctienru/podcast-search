@@ -19,6 +19,7 @@ else:
 MAPPINGS_DIR = PROJECT_ROOT / "mappings"
 
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
+ES_ENV: str = os.getenv("ES_ENV", "default")  # "local" | "production" | "default"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # Index management settings

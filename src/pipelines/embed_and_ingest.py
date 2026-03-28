@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Dict, Generator, Iterable, Optional
 
 from elasticsearch.helpers import streaming_bulk
+from sqlite_utils import Database
 
 from src.config import settings
 from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
@@ -34,6 +35,7 @@ from src.search.routing import IndexRoutingStrategy, LanguageSplitRoutingStrateg
 from src.services.es_service import ElasticsearchService
 from src.storage.base import StorageBase
 from src.storage.factory import create_storage
+from src.storage.sync_state import SyncStateRepository
 from src.types import IndexAlias, IngestCursor, IngestStats, Language
 from src.utils.logging import setup_logging
 from src.utils.parsers import normalize_language, parse_duration, parse_pub_date
@@ -110,6 +112,7 @@ class EmbedAndIngestPipeline:
         from_cache: bool = False,
         cache_dir: Optional[Path] = None,
         strict_cache: bool = False,
+        sync_repo: Optional[SyncStateRepository] = None,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.batch_size = batch_size  # default raised to 64 for better GPU/MPS utilisation
@@ -123,6 +126,7 @@ class EmbedAndIngestPipeline:
         self._from_cache = from_cache
         self._cache_dir = cache_dir or settings.EMBEDDING_CACHE_DIR
         self._strict_cache = strict_cache
+        self._sync_repo = sync_repo
 
         # Caches
         self._show_cache: Dict[str, Dict] = {}
@@ -133,6 +137,8 @@ class EmbedAndIngestPipeline:
         # Ingest tracking (populated during build_actions)
         self._index_counts: Dict[str, int] = defaultdict(int)
         self._language_distribution: Dict[str, int] = defaultdict(int)
+        # episode_id → index alias, populated during to_es_doc (used for writeback)
+        self._episode_aliases: Dict[str, str] = {}
 
         # Cache hit/miss counters (populated during batch_encode when from_cache=True)
         self._cache_hits: int = 0
@@ -450,9 +456,10 @@ class EmbedAndIngestPipeline:
             # v1 mode: route all episodes to the legacy monolithic alias.
             index_alias = _LEGACY_ALIAS
 
-        # Track per-alias and per-language counts
+        # Track per-alias and per-language counts, and record alias for writeback
         self._index_counts[index_alias] += 1
         self._language_distribution[language or "unknown"] += 1
+        self._episode_aliases[episode_id] = index_alias
 
         now = datetime.now(timezone.utc).isoformat()
 
@@ -578,6 +585,7 @@ class EmbedAndIngestPipeline:
         # Run bulk ingest
         success = 0
         errors = []
+        successful_ids: list[str] = []
 
         for ok, item in streaming_bulk(
             self.es.client,
@@ -587,6 +595,10 @@ class EmbedAndIngestPipeline:
         ):
             if ok:
                 success += 1
+                op_type = next(iter(item))
+                ep_id = item[op_type].get("_id")
+                if ep_id:
+                    successful_ids.append(ep_id)
                 if success % 1000 == 0:
                     logger.info(
                         "ingest_progress",
@@ -594,6 +606,21 @@ class EmbedAndIngestPipeline:
                     )
             else:
                 errors.append(item)
+
+        if successful_ids and self._sync_repo is not None:
+            for ep_id in successful_ids:
+                alias = self._episode_aliases.get(ep_id, "")
+                self._sync_repo.mark_done(
+                    entity_type="episode",
+                    entity_id=ep_id,
+                    index_alias=alias,
+                    environment=settings.ES_ENV,
+                )
+            self._sync_repo.commit()
+            logger.info(
+                "writeback_complete",
+                extra={"count": len(successful_ids), "environment": settings.ES_ENV},
+            )
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 
@@ -676,6 +703,7 @@ def run_incremental(
     from_cache: bool = False,
     cache_dir: Optional[Path] = None,
     strict_cache: bool = False,
+    sync_repo: Optional[SyncStateRepository] = None,
 ) -> dict:
     """Run ingest in incremental mode: only shows updated since the last run.
 
@@ -741,6 +769,7 @@ def run_incremental(
         from_cache=from_cache,
         cache_dir=cache_dir,
         strict_cache=strict_cache,
+        sync_repo=sync_repo,
     )
     stats = pipeline.run()
 
@@ -759,6 +788,7 @@ def run_backfill(
     cursor_path: Optional[Path] = None,
     batch_size: int = 64,
     dry_run: bool = False,
+    sync_repo: Optional[SyncStateRepository] = None,
 ) -> dict:
     """Re-ingest all shows regardless of cursor (force_full=True).
 
@@ -787,6 +817,7 @@ def run_backfill(
         cursor_path=cursor_path,
         batch_size=batch_size,
         dry_run=dry_run,
+        sync_repo=sync_repo,
     )
 
 
@@ -797,6 +828,7 @@ def upsert_by_show_id(
     embedding_backend: Optional[EmbeddingBackend] = _UNSET,  # type: ignore[assignment]
     batch_size: int = 64,
     dry_run: bool = False,
+    sync_repo: Optional[SyncStateRepository] = None,
 ) -> int:
     """Re-ingest all episodes for a single show.
 
@@ -836,6 +868,7 @@ def upsert_by_show_id(
         allowed_show_ids={show_id},
         batch_size=batch_size,
         dry_run=dry_run,
+        sync_repo=sync_repo,
     )
     stats = pipeline.run()
     return stats.get("success", 0)
@@ -909,6 +942,8 @@ def run() -> None:
     # --from-cache: skip embedding entirely; vectors come from disk cache.
     backend: Optional[EmbeddingBackend] = None if args.from_cache else LocalEmbeddingBackend()
 
+    _sync_repo = SyncStateRepository(Database(settings.SQLITE_PATH))
+
     if mode == "single":
         if not args.show_id:
             raise SystemExit("--show-id is required when SYNC_MODE=single")
@@ -917,6 +952,7 @@ def run() -> None:
             embedding_backend=backend,
             batch_size=args.batch_size,
             dry_run=args.dry_run,
+            sync_repo=_sync_repo,
         )
         logger.info("upsert_complete", extra={"show_id": args.show_id, "episodes": count})
     elif mode == "backfill":
@@ -925,6 +961,7 @@ def run() -> None:
             embedding_backend=None,
             batch_size=args.batch_size,
             dry_run=args.dry_run,
+            sync_repo=_sync_repo,
         )
     else:
         # incremental (default) or full
@@ -937,6 +974,7 @@ def run() -> None:
             allowed_show_ids=show_ids_filter,
             from_cache=args.from_cache,
             strict_cache=args.strict_cache,
+            sync_repo=_sync_repo,
         )
 
 

@@ -57,7 +57,9 @@ podcast-search/
 │   │   ├── base.py              # StorageBase ABC
 │   │   ├── sqlite.py            # SQLiteStorage (v2 primary source)
 │   │   ├── local.py             # LocalStorage (dev fallback)
-│   │   └── factory.py           # StorageFactory
+│   │   ├── factory.py           # StorageFactory
+│   │   ├── sync_state.py        # SyncStateRepository — writes search_sync_state after ES ingest
+│   │   └── episode_status.py    # EpisodeStatusRepository — writes embedding_status after embed
 │   ├── search/
 │   │   └── routing.py           # IndexRoutingStrategy (Strategy pattern)
 │   ├── es/                      # Elasticsearch utilities
@@ -207,18 +209,23 @@ python -m src.pipelines.embed_and_ingest
 
 ### Two-step workflow (decouple embedding from ES)
 
-Use when the embedding model runs locally but ES is remote. Step 1 computes vectors offline; Step 2 only touches the network.
+Use when the embedding model runs locally but ES is remote. Step 1 computes vectors offline and writes `embedding_status='done'` back to SQLite; Step 2 only touches the network.
 
 ```bash
-# Step 1 (local, slow): compute vectors and cache to data/embeddings/
+# Step 1 (local, slow): compute vectors, cache to data/embeddings/, write embedding_status='done'
 python -m src.pipelines.embed_episodes
 
-# Step 2 (fast, remote ES): read cache, write to ES
-ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache
+# Step 2 (fast, remote ES): read cache, write to ES, write search_sync_state(environment='local')
+ES_ENV=local ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache
+
+# Step 3 (production ES): same cache, different ES, writes separate search_sync_state row
+ES_ENV=production ES_HOST=<prod> ES_API_KEY=<key> python -m src.pipelines.embed_and_ingest --from-cache
 
 # Strict mode: fail immediately if any episode is missing from the cache
-ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache --strict-cache
+ES_ENV=local ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache --strict-cache
 ```
+
+After Step 2 + 3, `search_sync_state` holds two independent rows per episode — one for each environment — so both can be tracked independently.
 
 ### Backfill a newly added non-analyzer field
 
@@ -273,13 +280,19 @@ The service exposes two endpoints used by `podcast-backend`:
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Health check |
-| `POST /embed` | Encode a query string to an embedding vector |
+| `POST /embed` | Encode a query string to an embedding vector (internal format) |
+| `POST /v1/embeddings` | OpenAI-compatible embeddings endpoint (used by `podcast-backend` EmbeddingProvider) |
 
 ```bash
-# Embed a query
+# Embed a query (internal format)
 curl -X POST http://localhost:8000/embed \
   -H "Content-Type: application/json" \
   -d '{"texts": ["artificial intelligence"], "language": "zh-tw"}'
+
+# Embed via OpenAI-compatible endpoint
+curl -X POST http://localhost:8000/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"input": ["artificial intelligence"], "model": "BAAI/bge-base-zh-v1.5"}'
 ```
 
 ## Environment Variables
@@ -289,6 +302,7 @@ curl -X POST http://localhost:8000/embed \
 | `SQLITE_PATH` | `data/crawler.db` | SQLite path (v2 data source) |
 | `DATA_DIR` | `data` | Local data directory |
 | `ES_HOST` | `http://localhost:9200` | Elasticsearch URL |
+| `ES_ENV` | `default` | ES environment label written to `search_sync_state.environment` — use `local` or `production` to track multi-env syncs independently |
 | `ES_API_KEY` | — | ES API key (remote auth) |
 | `INDEX_VERSION` | `1` | Index version number |
 | `LOG_LEVEL` | `INFO` | Log level |
@@ -298,6 +312,7 @@ curl -X POST http://localhost:8000/embed \
 | `INGEST_CURSOR_PATH` | `data/ingest_cursor.json` | Incremental ingest cursor |
 | `ENABLE_LANGUAGE_SPLIT` | `true` | Use 3-index language-split layout (v2 default) |
 | `EMBEDDING_CACHE_DIR` | `data/embeddings` | Vector cache dir (written by `embed_episodes`, read by `embed_and_ingest --from-cache`) |
+| `EMBEDDING_TEXT_VERSION` | `text-v1` | Embedding text assembly version; bump when the text format changes |
 | `EMBEDDING_API_URL` | — | External embedding API URL (Phase 3-B) |
 | `EMBEDDING_API_KEY` | — | External embedding API key (Phase 3-B) |
 
