@@ -27,10 +27,48 @@ class SyncStateRepository:
         self._ensure_table()
 
     def _ensure_table(self) -> None:
+        # Migration: if table exists without environment column, recreate with new PK
+        table_names = [r[0] for r in self._db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if self._TABLE in table_names:
+            cols = [row[1] for row in self._db.execute(f"PRAGMA table_info({self._TABLE})").fetchall()]
+            if "environment" not in cols:
+                self._db.execute(f"ALTER TABLE {self._TABLE} RENAME TO {self._TABLE}_old")
+                self._db.execute(f"""
+                    CREATE TABLE {self._TABLE} (
+                      entity_type       TEXT NOT NULL,
+                      entity_id         TEXT NOT NULL,
+                      environment       TEXT NOT NULL DEFAULT 'default',
+                      index_alias       TEXT,
+                      backing_index     TEXT,
+                      index_version     TEXT,
+                      content_hash      TEXT,
+                      source_updated_at TEXT,
+                      embedding_model   TEXT,
+                      embedding_version TEXT,
+                      sync_status       TEXT DEFAULT 'pending',
+                      last_synced_at    TEXT,
+                      last_error        TEXT,
+                      PRIMARY KEY (entity_type, entity_id, environment)
+                    )
+                """)
+                self._db.execute(f"""
+                    INSERT INTO {self._TABLE}
+                      (entity_type, entity_id, environment, index_alias, backing_index,
+                       index_version, content_hash, source_updated_at, embedding_model,
+                       embedding_version, sync_status, last_synced_at, last_error)
+                    SELECT entity_type, entity_id, 'default', index_alias, backing_index,
+                       index_version, content_hash, source_updated_at, embedding_model,
+                       embedding_version, sync_status, last_synced_at, last_error
+                    FROM {self._TABLE}_old
+                """)
+                self._db.execute(f"DROP TABLE {self._TABLE}_old")
+                self._db.conn.commit()
+
         self._db.execute(f"""
             CREATE TABLE IF NOT EXISTS {self._TABLE} (
               entity_type       TEXT NOT NULL,
               entity_id         TEXT NOT NULL,
+              environment       TEXT NOT NULL DEFAULT 'default',
               index_alias       TEXT,
               backing_index     TEXT,
               index_version     TEXT,
@@ -41,7 +79,7 @@ class SyncStateRepository:
               sync_status       TEXT DEFAULT 'pending',
               last_synced_at    TEXT,
               last_error        TEXT,
-              PRIMARY KEY (entity_type, entity_id)
+              PRIMARY KEY (entity_type, entity_id, environment)
             )
         """)
         self._db.execute(f"""
@@ -52,6 +90,10 @@ class SyncStateRepository:
             CREATE INDEX IF NOT EXISTS idx_{self._TABLE}_entity_type
             ON {self._TABLE} (entity_type)
         """)
+        self._db.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{self._TABLE}_environment
+            ON {self._TABLE} (environment)
+        """)
 
     def mark_done(
         self,
@@ -61,16 +103,17 @@ class SyncStateRepository:
         content_hash: Optional[str] = None,
         source_updated_at: Optional[str] = None,
         embedding_model: Optional[str] = None,
+        environment: str = "default",
     ) -> None:
         """Record a successful ES sync."""
         now = _utc_now_iso()
         self._db.execute(
             f"""
             INSERT INTO {self._TABLE}
-              (entity_type, entity_id, index_alias, content_hash, source_updated_at,
-               embedding_model, sync_status, last_synced_at, last_error)
-            VALUES (?, ?, ?, ?, ?, ?, 'synced', ?, NULL)
-            ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+              (entity_type, entity_id, environment, index_alias, content_hash,
+               source_updated_at, embedding_model, sync_status, last_synced_at, last_error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'synced', ?, NULL)
+            ON CONFLICT(entity_type, entity_id, environment) DO UPDATE SET
               index_alias       = excluded.index_alias,
               content_hash      = excluded.content_hash,
               source_updated_at = excluded.source_updated_at,
@@ -79,5 +122,5 @@ class SyncStateRepository:
               last_synced_at    = excluded.last_synced_at,
               last_error        = NULL
             """,
-            [entity_type, entity_id, index_alias, content_hash, source_updated_at, embedding_model, now],
+            [entity_type, entity_id, environment, index_alias, content_hash, source_updated_at, embedding_model, now],
         )

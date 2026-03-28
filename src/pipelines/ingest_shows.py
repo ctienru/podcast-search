@@ -210,6 +210,7 @@ class IngestShowsPipeline:
                         index_alias=self.INDEX_ALIAS,
                         content_hash=show.get("content_hash"),
                         source_updated_at=show.get("updated_at"),
+                        environment=settings.ES_ENV,
                     )
 
 

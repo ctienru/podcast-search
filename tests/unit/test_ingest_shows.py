@@ -48,6 +48,7 @@ class TestIngestShowsSyncState:
             index_alias=IngestShowsPipeline.INDEX_ALIAS,
             content_hash="abc123",
             source_updated_at="2026-01-01T00:00:00Z",
+            environment="default",
         )
 
     def test_mark_done_not_called_for_errored_show(self, es_service):
@@ -91,4 +92,5 @@ class TestIngestShowsSyncState:
             index_alias=IngestShowsPipeline.INDEX_ALIAS,
             content_hash="abc123",
             source_updated_at="2026-01-01T00:00:00Z",
+            environment="default",
         )

@@ -40,8 +40,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
+from sqlite_utils import Database
+
 from src.config import settings
 from src.embedding.backend import LocalEmbeddingBackend, MODEL_MAP
+from src.storage.episode_status import EpisodeStatusRepository
 from src.types import Language
 from src.utils.logging import setup_logging
 
@@ -124,6 +127,7 @@ def run(
     force: bool = False,
     batch_size: int = 64,
     cache_dir: Optional[Path] = None,
+    db: Optional[Database] = None,
 ) -> Dict[str, int]:
     """Compute embeddings and write to disk cache.
 
@@ -132,6 +136,8 @@ def run(
         force:            Re-embed even when a valid cache already exists.
         batch_size:       Encoding batch size per language group.
         cache_dir:        Cache root directory. Defaults to settings.EMBEDDING_CACHE_DIR.
+        db:               Optional sqlite-utils Database for writing embedding_status='done'
+                          back to episodes table. Pass None to skip DB writeback.
 
     Returns:
         Stats dict with keys: written, skipped, failed, total.
@@ -139,6 +145,7 @@ def run(
     _cache_dir = cache_dir or settings.EMBEDDING_CACHE_DIR
     _cache_dir.mkdir(parents=True, exist_ok=True)
 
+    ep_repo = EpisodeStatusRepository(db) if db is not None else None
     backend = LocalEmbeddingBackend()
 
     if not EMBEDDING_INPUT_DIR.exists():
@@ -256,6 +263,13 @@ def run(
                 json.dump(cache_entry, f)
             stats["written"] += len(episodes_vectors)  # only newly computed
             logger.debug("embed_episodes_written", extra={"show_id": show_id, "count": len(episodes_vectors)})
+            if ep_repo is not None and episodes_vectors:
+                ep_repo.mark_embedded_batch(
+                    list(episodes_vectors.keys()),
+                    model=model_name,
+                    version=embedding_version,
+                    embedded_at=cache_entry["embedded_at"],
+                )
         except Exception as e:
             logger.warning("embed_episodes_write_failed", extra={"show_id": show_id, "error": str(e)})
             stats["failed"] += len(inputs)
@@ -274,7 +288,8 @@ def main() -> None:
     setup_logging()
 
     show_ids_filter = set(args.show_ids) if args.show_ids else None
-    run(allowed_show_ids=show_ids_filter, force=args.force, batch_size=args.batch_size)
+    _db = Database(settings.SQLITE_PATH)
+    run(allowed_show_ids=show_ids_filter, force=args.force, batch_size=args.batch_size, db=_db)
 
 
 if __name__ == "__main__":
