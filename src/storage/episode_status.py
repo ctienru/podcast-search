@@ -6,7 +6,6 @@ tracks ES ingest status.
 """
 
 from datetime import datetime, timezone
-from typing import Optional
 
 from sqlite_utils import Database
 
@@ -41,17 +40,23 @@ class EpisodeStatusRepository:
         """
         if not episode_ids:
             return 0
-        placeholders = ",".join("?" * len(episode_ids))
+        # SQLite has a hard limit on bound parameters (~999). Chunk to stay safe.
+        MAX_CHUNK = 900
+        total = 0
         now = _utc_now_iso()
-        result = self._db.execute(
-            f"""UPDATE episodes SET
-                  embedding_status  = 'done',
-                  embedding_model   = ?,
-                  embedding_version = ?,
-                  last_embedded_at  = ?,
-                  updated_at        = ?
-                WHERE episode_id IN ({placeholders})""",
-            [model, version, embedded_at, now] + list(episode_ids),
-        )
+        for i in range(0, len(episode_ids), MAX_CHUNK):
+            chunk = episode_ids[i : i + MAX_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            result = self._db.execute(
+                f"""UPDATE episodes SET
+                      embedding_status  = 'done',
+                      embedding_model   = ?,
+                      embedding_version = ?,
+                      last_embedded_at  = ?,
+                      updated_at        = ?
+                    WHERE episode_id IN ({placeholders})""",
+                [model, version, embedded_at, now] + list(chunk),
+            )
+            total += result.rowcount
         self._db.conn.commit()
-        return result.rowcount
+        return total

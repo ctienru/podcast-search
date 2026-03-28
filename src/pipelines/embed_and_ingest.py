@@ -616,7 +616,7 @@ class EmbedAndIngestPipeline:
                     index_alias=alias,
                     environment=settings.ES_ENV,
                 )
-            self._sync_repo._db.conn.commit()
+            self._sync_repo.commit()
             logger.info(
                 "writeback_complete",
                 extra={"count": len(successful_ids), "environment": settings.ES_ENV},

@@ -212,6 +212,7 @@ class IngestShowsPipeline:
                         source_updated_at=show.get("updated_at"),
                         environment=settings.ES_ENV,
                     )
+            self.sync_repo.commit()
 
 
 def run() -> None:

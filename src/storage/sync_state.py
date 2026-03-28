@@ -32,37 +32,43 @@ class SyncStateRepository:
         if self._TABLE in table_names:
             cols = [row[1] for row in self._db.execute(f"PRAGMA table_info({self._TABLE})").fetchall()]
             if "environment" not in cols:
-                self._db.execute(f"ALTER TABLE {self._TABLE} RENAME TO {self._TABLE}_old")
-                self._db.execute(f"""
-                    CREATE TABLE {self._TABLE} (
-                      entity_type       TEXT NOT NULL,
-                      entity_id         TEXT NOT NULL,
-                      environment       TEXT NOT NULL DEFAULT 'default',
-                      index_alias       TEXT,
-                      backing_index     TEXT,
-                      index_version     TEXT,
-                      content_hash      TEXT,
-                      source_updated_at TEXT,
-                      embedding_model   TEXT,
-                      embedding_version TEXT,
-                      sync_status       TEXT DEFAULT 'pending',
-                      last_synced_at    TEXT,
-                      last_error        TEXT,
-                      PRIMARY KEY (entity_type, entity_id, environment)
-                    )
-                """)
-                self._db.execute(f"""
-                    INSERT INTO {self._TABLE}
-                      (entity_type, entity_id, environment, index_alias, backing_index,
-                       index_version, content_hash, source_updated_at, embedding_model,
-                       embedding_version, sync_status, last_synced_at, last_error)
-                    SELECT entity_type, entity_id, 'default', index_alias, backing_index,
-                       index_version, content_hash, source_updated_at, embedding_model,
-                       embedding_version, sync_status, last_synced_at, last_error
-                    FROM {self._TABLE}_old
-                """)
-                self._db.execute(f"DROP TABLE {self._TABLE}_old")
-                self._db.conn.commit()
+                conn = self._db.conn
+                conn.execute("BEGIN")
+                try:
+                    conn.execute(f"ALTER TABLE {self._TABLE} RENAME TO {self._TABLE}_old")
+                    conn.execute(f"""
+                        CREATE TABLE {self._TABLE} (
+                          entity_type       TEXT NOT NULL,
+                          entity_id         TEXT NOT NULL,
+                          environment       TEXT NOT NULL DEFAULT 'default',
+                          index_alias       TEXT,
+                          backing_index     TEXT,
+                          index_version     TEXT,
+                          content_hash      TEXT,
+                          source_updated_at TEXT,
+                          embedding_model   TEXT,
+                          embedding_version TEXT,
+                          sync_status       TEXT DEFAULT 'pending',
+                          last_synced_at    TEXT,
+                          last_error        TEXT,
+                          PRIMARY KEY (entity_type, entity_id, environment)
+                        )
+                    """)
+                    conn.execute(f"""
+                        INSERT INTO {self._TABLE}
+                          (entity_type, entity_id, environment, index_alias, backing_index,
+                           index_version, content_hash, source_updated_at, embedding_model,
+                           embedding_version, sync_status, last_synced_at, last_error)
+                        SELECT entity_type, entity_id, 'default', index_alias, backing_index,
+                           index_version, content_hash, source_updated_at, embedding_model,
+                           embedding_version, sync_status, last_synced_at, last_error
+                        FROM {self._TABLE}_old
+                    """)
+                    conn.execute(f"DROP TABLE {self._TABLE}_old")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
 
         self._db.execute(f"""
             CREATE TABLE IF NOT EXISTS {self._TABLE} (
@@ -94,6 +100,10 @@ class SyncStateRepository:
             CREATE INDEX IF NOT EXISTS idx_{self._TABLE}_environment
             ON {self._TABLE} (environment)
         """)
+
+    def commit(self) -> None:
+        """Commit pending writes to the database."""
+        self._db.conn.commit()
 
     def mark_done(
         self,
