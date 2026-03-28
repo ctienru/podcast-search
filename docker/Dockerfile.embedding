@@ -26,6 +26,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy only the necessary source code for API
 COPY src/api/ src/api/
 COPY src/embedding/ src/embedding/
+COPY src/utils/ src/utils/
+COPY src/__init__.py src/__init__.py
+COPY src/types.py src/types.py
 
 # Environment variables
 ENV MODEL_NAME=paraphrase-multilingual-MiniLM-L12-v2
