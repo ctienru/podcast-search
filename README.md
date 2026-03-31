@@ -179,7 +179,7 @@ SYNC_MODE=full python -m src.pipelines.embed_and_ingest
 
 # Step 4b — Two-step: pre-compute vectors locally, then write to remote ES
 python -m src.pipelines.embed_episodes --batch-size 512          # slow, local; writes data/embeddings/
-ES_HOST=<remote> SYNC_MODE=full python -m src.pipelines.embed_and_ingest --from-cache --batch-size 512
+ES_HOST=<remote> SYNC_MODE=full python -m src.pipelines.embed_and_ingest --from-cache --es-chunk-size 512
 ```
 
 ### 5. Verify
@@ -217,11 +217,11 @@ Use when the embedding model runs locally but ES is remote. Step 1 computes vect
 python -m src.pipelines.embed_episodes --batch-size 512
 
 # Step 2 (fast, remote ES): read cache, write to ES, write search_sync_state(environment='local')
-# --from-cache skips embedding; batch-size controls ES bulk chunk size only
-ES_ENV=local ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache --batch-size 512
+# --from-cache skips embedding; --es-chunk-size controls ES bulk chunk size (default: 500)
+ES_ENV=local ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache --es-chunk-size 512
 
 # Step 3 (production ES): same cache, different ES, writes separate search_sync_state row
-ES_ENV=production ES_HOST=<prod> ES_API_KEY=<key> python -m src.pipelines.embed_and_ingest --from-cache --batch-size 512
+ES_ENV=production ES_HOST=<prod> ES_API_KEY=<key> python -m src.pipelines.embed_and_ingest --from-cache --es-chunk-size 512
 
 # Strict mode: fail immediately if any episode is missing from the cache
 ES_ENV=local ES_HOST=<remote> python -m src.pipelines.embed_and_ingest --from-cache --strict-cache
