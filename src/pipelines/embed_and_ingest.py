@@ -27,6 +27,7 @@ from typing import Dict, Generator, Iterable, Optional
 
 from elasticsearch.helpers import streaming_bulk
 from sqlite_utils import Database
+from tqdm import tqdm
 
 from src.config import settings
 from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
@@ -113,9 +114,11 @@ class EmbedAndIngestPipeline:
         cache_dir: Optional[Path] = None,
         strict_cache: bool = False,
         sync_repo: Optional[SyncStateRepository] = None,
+        es_chunk_size: int = 500,
     ) -> None:
         self.es = es_service or ElasticsearchService()
         self.batch_size = batch_size  # default raised to 64 for better GPU/MPS utilisation
+        self._es_chunk_size = es_chunk_size
         self.dry_run = dry_run
         self.storage = storage or create_storage()
         self.routing_strategy: IndexRoutingStrategy = (
@@ -587,25 +590,23 @@ class EmbedAndIngestPipeline:
         errors = []
         successful_ids: list[str] = []
 
-        for ok, item in streaming_bulk(
-            self.es.client,
-            self.build_actions(self.load_embedding_inputs()),
-            chunk_size=500,
-            raise_on_error=False,
-        ):
-            if ok:
-                success += 1
-                op_type = next(iter(item))
-                ep_id = item[op_type].get("_id")
-                if ep_id:
-                    successful_ids.append(ep_id)
-                if success % 1000 == 0:
-                    logger.info(
-                        "ingest_progress",
-                        extra={"processed": success, "total": total_count},
-                    )
-            else:
-                errors.append(item)
+        with tqdm(total=total_count, desc="Syncing to ES", unit="ep") as pbar:
+            for ok, item in streaming_bulk(
+                self.es.client,
+                self.build_actions(self.load_embedding_inputs()),
+                chunk_size=self._es_chunk_size,
+                raise_on_error=False,
+            ):
+                if ok:
+                    success += 1
+                    op_type = next(iter(item))
+                    ep_id = item[op_type].get("_id")
+                    if ep_id:
+                        successful_ids.append(ep_id)
+                else:
+                    errors.append(item)
+                pbar.update(1)
+                pbar.set_postfix(ok=success, err=len(errors))
 
         if successful_ids and self._sync_repo is not None:
             for ep_id in successful_ids:
@@ -704,6 +705,7 @@ def run_incremental(
     cache_dir: Optional[Path] = None,
     strict_cache: bool = False,
     sync_repo: Optional[SyncStateRepository] = None,
+    es_chunk_size: int = 500,
 ) -> dict:
     """Run ingest in incremental mode: only shows updated since the last run.
 
@@ -770,6 +772,7 @@ def run_incremental(
         cache_dir=cache_dir,
         strict_cache=strict_cache,
         sync_repo=sync_repo,
+        es_chunk_size=es_chunk_size,
     )
     stats = pipeline.run()
 
@@ -789,6 +792,7 @@ def run_backfill(
     batch_size: int = 64,
     dry_run: bool = False,
     sync_repo: Optional[SyncStateRepository] = None,
+    es_chunk_size: int = 500,
 ) -> dict:
     """Re-ingest all shows regardless of cursor (force_full=True).
 
@@ -818,6 +822,7 @@ def run_backfill(
         batch_size=batch_size,
         dry_run=dry_run,
         sync_repo=sync_repo,
+        es_chunk_size=es_chunk_size,
     )
 
 
@@ -829,6 +834,7 @@ def upsert_by_show_id(
     batch_size: int = 64,
     dry_run: bool = False,
     sync_repo: Optional[SyncStateRepository] = None,
+    es_chunk_size: int = 500,
 ) -> int:
     """Re-ingest all episodes for a single show.
 
@@ -869,6 +875,7 @@ def upsert_by_show_id(
         batch_size=batch_size,
         dry_run=dry_run,
         sync_repo=sync_repo,
+        es_chunk_size=es_chunk_size,
     )
     stats = pipeline.run()
     return stats.get("success", 0)
@@ -931,6 +938,13 @@ def run() -> None:
         help="Fail if any episode is missing from the vector cache (requires --from-cache). "
              "Use in CI or backfill to ensure all episodes have been pre-embedded.",
     )
+    parser.add_argument(
+        "--es-chunk-size",
+        type=int,
+        default=500,
+        help="Number of documents per ES bulk request (default: 500). "
+             "Reduce to 100–200 for remote ES to avoid request timeouts.",
+    )
     args = parser.parse_args()
 
     if args.strict_cache and not args.from_cache:
@@ -953,6 +967,7 @@ def run() -> None:
             batch_size=args.batch_size,
             dry_run=args.dry_run,
             sync_repo=_sync_repo,
+            es_chunk_size=args.es_chunk_size,
         )
         logger.info("upsert_complete", extra={"show_id": args.show_id, "episodes": count})
     elif mode == "backfill":
@@ -962,6 +977,7 @@ def run() -> None:
             batch_size=args.batch_size,
             dry_run=args.dry_run,
             sync_repo=_sync_repo,
+            es_chunk_size=args.es_chunk_size,
         )
     else:
         # incremental (default) or full
@@ -975,6 +991,7 @@ def run() -> None:
             from_cache=args.from_cache,
             strict_cache=args.strict_cache,
             sync_repo=_sync_repo,
+            es_chunk_size=args.es_chunk_size,
         )
 
 
