@@ -2,9 +2,10 @@
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+from sqlite_utils import Database
 
 import src.pipelines.embed_episodes as embed_ep
 from src.pipelines.embed_episodes import run
@@ -85,6 +86,37 @@ def _mock_backend(num_texts: int = 1):
     return mock
 
 
+def _make_db(tmp_path: Path) -> Database:
+    db = Database(tmp_path / "crawler.db")
+    db.executescript("""
+        CREATE TABLE shows (
+            show_id TEXT PRIMARY KEY,
+            target_index TEXT
+        );
+        CREATE TABLE episodes (
+            episode_id TEXT PRIMARY KEY,
+            embedding_status TEXT,
+            embedding_model TEXT,
+            embedding_version TEXT,
+            last_embedded_at TEXT,
+            updated_at TEXT
+        );
+    """)
+    return db
+
+
+def _assert_only_warmup_calls(mock_backend: MagicMock) -> None:
+    assert mock_backend.embed_batch.call_count == 2
+    assert mock_backend.embed_batch.call_args_list == [
+        call(["warmup"], "zh-tw"),
+        call(["warmup"], "en"),
+    ]
+
+
+def _assert_real_embed_calls(mock_backend: MagicMock, count: int) -> None:
+    assert mock_backend.embed_batch.call_count == count + 2
+
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 
@@ -127,7 +159,7 @@ def test_full_cache_hit(tmp_path: Path) -> None:
 
     assert stats["written"] == 0
     assert stats["skipped"] == 2
-    mock_backend.embed_batch.assert_not_called()
+    _assert_only_warmup_calls(mock_backend)
 
 
 def test_partial_cache_miss(tmp_path: Path) -> None:
@@ -152,7 +184,7 @@ def test_partial_cache_miss(tmp_path: Path) -> None:
     assert stats["failed"] == 0
 
     # embed_batch was called exactly once, with just ep-3
-    assert mock_backend.embed_batch.call_count == 1
+    _assert_real_embed_calls(mock_backend, 1)
     texts_sent = mock_backend.embed_batch.call_args[0][0]
     assert len(texts_sent) == 1
 
@@ -176,7 +208,7 @@ def test_model_mismatch_triggers_full_reembed(tmp_path: Path) -> None:
 
     assert stats["written"] == 1
     assert stats["skipped"] == 0
-    mock_backend.embed_batch.assert_called_once()
+    _assert_real_embed_calls(mock_backend, 1)
 
 
 def test_force_flag_bypasses_cache(tmp_path: Path) -> None:
@@ -194,7 +226,7 @@ def test_force_flag_bypasses_cache(tmp_path: Path) -> None:
 
     assert stats["written"] == 1
     assert stats["skipped"] == 0
-    mock_backend.embed_batch.assert_called_once()
+    _assert_real_embed_calls(mock_backend, 1)
 
 
 def test_show_id_filter(tmp_path: Path) -> None:
@@ -231,7 +263,50 @@ def test_missing_language_counts_as_failed(tmp_path: Path) -> None:
 
     assert stats["failed"] > 0
     assert stats["written"] == 0
-    mock_backend.embed_batch.assert_not_called()
+    _assert_only_warmup_calls(mock_backend)
+
+
+def test_unsupported_show_is_excluded_not_failed(tmp_path: Path) -> None:
+    """Shows with target_index=NULL should be excluded from coverage, not counted as failed."""
+    p_input, p_cleaned, ei_dir, cl_dir = _patch_dirs(tmp_path)
+    cache_dir = tmp_path / "embeddings"
+    db = _make_db(tmp_path)
+    db["shows"].insert({"show_id": "show-Z", "target_index": None}, pk="show_id")
+    mock_backend = _mock_backend()
+
+    with p_input, p_cleaned, patch("src.pipelines.embed_episodes.LocalEmbeddingBackend", return_value=mock_backend):
+        _write_embedding_input(ei_dir, "ep-orphan", "show-Z")
+        _write_cleaned_episode(cl_dir, "ep-orphan", "show-Z", target_index="")
+
+        stats = run(cache_dir=cache_dir, db=db)
+
+    assert stats["total"] == 0
+    assert stats["excluded"] == 1
+    assert stats["failed"] == 0
+    assert stats["written"] == 0
+    _assert_only_warmup_calls(mock_backend)
+
+
+def test_show_target_index_from_db_fallbacks_when_cleaned_json_is_stale(tmp_path: Path) -> None:
+    """Supported shows should still embed when cleaned JSON lacks target_index."""
+    p_input, p_cleaned, ei_dir, cl_dir = _patch_dirs(tmp_path)
+    cache_dir = tmp_path / "embeddings"
+    db = _make_db(tmp_path)
+    db["shows"].insert({"show_id": "show-A", "target_index": "podcast-episodes-zh-tw"}, pk="show_id")
+    db["episodes"].insert({"episode_id": "ep-1"}, pk="episode_id")
+    mock_backend = _mock_backend()
+
+    with p_input, p_cleaned, patch("src.pipelines.embed_episodes.LocalEmbeddingBackend", return_value=mock_backend):
+        _write_embedding_input(ei_dir, "ep-1", "show-A")
+        _write_cleaned_episode(cl_dir, "ep-1", "show-A", target_index="")
+
+        stats = run(cache_dir=cache_dir, db=db)
+
+    assert stats["total"] == 1
+    assert stats["written"] == 1
+    assert stats["failed"] == 0
+    assert stats["excluded"] == 0
+    _assert_real_embed_calls(mock_backend, 1)
 
 
 def test_embedding_version_mismatch_triggers_full_reembed(tmp_path: Path) -> None:
@@ -250,7 +325,7 @@ def test_embedding_version_mismatch_triggers_full_reembed(tmp_path: Path) -> Non
 
     assert stats["written"] == 1
     assert stats["skipped"] == 0
-    mock_backend.embed_batch.assert_called_once()
+    _assert_real_embed_calls(mock_backend, 1)
 
 
 def test_written_cache_contains_embedding_version(tmp_path: Path) -> None:

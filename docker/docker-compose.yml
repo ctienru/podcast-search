@@ -2,7 +2,9 @@ version: "3.8"
 
 services:
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
+    build:
+      context: ./elasticsearch
+      dockerfile: Dockerfile
     container_name: podcast-es
     environment:
       # single node for local dev

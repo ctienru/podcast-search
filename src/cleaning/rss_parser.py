@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
+from lxml import etree as _lxml_etree
+
 
 # RSS 2.0 namespaces
 NAMESPACES = {
@@ -88,8 +90,16 @@ class RSSParser:
         # Extract show_id from filename
         show_id = xml_path.stem  # e.g., "show:apple:1234567890"
 
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+        except ET.ParseError:
+            # Fall back to lxml with recover=True for malformed XML
+            # (e.g. bare & characters, invalid control characters in RSS feeds)
+            parser = _lxml_etree.XMLParser(recover=True, encoding="utf-8")
+            lxml_tree = _lxml_etree.parse(str(xml_path), parser)
+            xml_bytes = _lxml_etree.tostring(lxml_tree.getroot())
+            root = ET.fromstring(xml_bytes)
 
         channel = root.find("channel")
         if channel is None:

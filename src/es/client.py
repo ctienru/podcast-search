@@ -50,25 +50,34 @@ def get_es_client() -> Elasticsearch:
     es_user = os.getenv("ES_USER") or os.getenv("ELASTICSEARCH_USERNAME")
     es_password = os.getenv("ES_PASSWORD") or os.getenv("ELASTICSEARCH_PASSWORD")
 
+    _timeout_kwargs = dict(
+        request_timeout=60,
+        retry_on_timeout=True,
+        max_retries=3,
+    )
+
     if api_key_id and api_key_secret:
         # Use tuple format (no base64 encoding needed)
         logger.info(f"Connecting to ES at {host} with API Key (id: {api_key_id[:8]}...)")
         return Elasticsearch(
             hosts=[host],
             api_key=(api_key_id, api_key_secret),
+            **_timeout_kwargs,
         )
     elif api_key_encoded:
         logger.info(f"Connecting to ES at {host} with API Key (encoded)")
         return Elasticsearch(
             hosts=[host],
             api_key=api_key_encoded,
+            **_timeout_kwargs,
         )
     elif es_user and es_password:
         logger.info(f"Connecting to ES at {host} with Basic Auth (user: {es_user})")
         return Elasticsearch(
             hosts=[host],
             basic_auth=(es_user, es_password),
+            **_timeout_kwargs,
         )
     else:
         logger.info(f"Connecting to ES at {host} without authentication (local dev)")
-        return Elasticsearch(hosts=[host])
+        return Elasticsearch(hosts=[host], **_timeout_kwargs)
