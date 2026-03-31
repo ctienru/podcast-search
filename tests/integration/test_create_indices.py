@@ -36,6 +36,8 @@ def cleanup(es_client: Elasticsearch):
         for alias in _LANG_ALIASES:
             if es_client.indices.exists_alias(name=alias):
                 es_client.indices.delete_alias(index="*", name=alias)
+            # Also delete any concrete index that shares the alias name
+            es_client.indices.delete(index=alias, ignore_unavailable=True)
 
     _delete_all()
     yield
