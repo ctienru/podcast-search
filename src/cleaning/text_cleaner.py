@@ -18,7 +18,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
 
-from bs4 import BeautifulSoup
+import warnings
+
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
+
+warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 
 @dataclass

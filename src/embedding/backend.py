@@ -127,7 +127,7 @@ class LocalEmbeddingBackend(EmbeddingBackend):
             List of embedding vectors in the same order as texts.
         """
         model = _load_model(MODEL_MAP[self._model_key(language)])
-        return model.encode(texts, normalize_embeddings=True).tolist()
+        return model.encode(texts, normalize_embeddings=True, show_progress_bar=False).tolist()
 
 
 # ── API Backend (query-time / external service) ───────────────────────────────
