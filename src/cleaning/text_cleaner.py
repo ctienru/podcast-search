@@ -22,8 +22,6 @@ import warnings
 
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 
-warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
-
 
 @dataclass
 class ParagraphInfo:
@@ -147,7 +145,9 @@ class PodcastTextCleaner:
         # Decode HTML entities first
         text = html.unescape(text)
 
-        soup = BeautifulSoup(text, "html.parser")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
+            soup = BeautifulSoup(text, "html.parser")
 
         # Remove script and style elements
         for element in soup(["script", "style"]):

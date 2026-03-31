@@ -37,6 +37,7 @@ def _process_show_worker(args: tuple) -> dict:
     xml_path, target_index_by_show, output_dir = args
     xml_path = Path(xml_path)
     output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     parser = RSSParser()
     cleaner = PodcastTextCleaner()

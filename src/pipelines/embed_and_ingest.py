@@ -590,7 +590,7 @@ class EmbedAndIngestPipeline:
         errors = []
         successful_ids: list[str] = []
 
-        with tqdm(total=total_count, desc="Syncing to ES", unit="ep") as pbar:
+        with tqdm(desc="Syncing to ES", unit="ep") as pbar:
             for ok, item in streaming_bulk(
                 self.es.client,
                 self.build_actions(self.load_embedding_inputs()),
