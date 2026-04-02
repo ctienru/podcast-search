@@ -28,7 +28,7 @@ class TestOpenAIEmbed:
         resp = client.post("/v1/embeddings", json={"model": MODEL_ZH, "input": "人工智慧"})
 
         assert resp.status_code == 200
-        mock.embed_batch.assert_called_once_with(["人工智慧"], "zh-tw")
+        mock.embed_batch.assert_called_once_with(["人工智慧"], "en")
 
     def test_array_input(self, mocker):
         mock = make_mock_backend(mocker, [[0.1], [0.2]])
@@ -36,7 +36,7 @@ class TestOpenAIEmbed:
         resp = client.post("/v1/embeddings", json={"model": MODEL_EN, "input": ["hello", "world"]})
 
         assert resp.status_code == 200
-        mock.embed_batch.assert_called_once_with(["hello", "world"], "zh-tw")
+        mock.embed_batch.assert_called_once_with(["hello", "world"], "en")
 
     def test_response_schema(self, mocker):
         make_mock_backend(mocker, [[0.5, 0.6]])

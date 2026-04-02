@@ -23,7 +23,7 @@ from src.types import Language
 logger = logging.getLogger(__name__)
 
 MODEL_MAP: dict[str, str] = {
-    "zh": "paraphrase-multilingual-MiniLM-L12-v2",# 384 dim, zh-tw + zh-cn
+    "zh": "paraphrase-multilingual-MiniLM-L12-v2",  # 384 dim, zh-tw + zh-cn
     "en": "paraphrase-multilingual-MiniLM-L12-v2",    # 384 dim
 }
 

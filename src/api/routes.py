@@ -33,8 +33,10 @@ _LANGUAGE_TO_DIM: dict[str, int] = {
 
 # Reverse map for /v1/embeddings: model name → canonical language for embed_batch()
 # Unknown model names are rejected with 422 (no silent fallback).
+# Since zh-tw, zh-cn, and en all use the same model, the reverse map has a
+# single entry. "en" is the canonical language for this model name.
 _MODEL_TO_LANG: dict[str, str] = {
-    "paraphrase-multilingual-MiniLM-L12-v2": "zh-tw",
+    "paraphrase-multilingual-MiniLM-L12-v2": "en",
 }
 
 

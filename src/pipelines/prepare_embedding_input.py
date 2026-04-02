@@ -48,8 +48,10 @@ def _build_embedding_text(cleaned: Dict) -> str:
     paragraphs = cleaned.get("cleaned", {}).get("paragraphs", [])
     kept_texts = [p["text"] for p in paragraphs if p.get("kept") and p.get("text")]
 
-    if kept_texts:
+    if title and kept_texts:
         return title + "\n\n" + "\n\n".join(kept_texts)
+    if kept_texts:
+        return "\n\n".join(kept_texts)
     return title
 
 
