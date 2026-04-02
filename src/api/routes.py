@@ -21,20 +21,21 @@ _backend: EmbeddingBackend | None = None
 
 # Model names reported in responses — kept in sync with backend.MODEL_MAP
 _LANGUAGE_TO_MODEL: dict[str, str] = {
-    "zh-tw": "BAAI/bge-base-zh-v1.5",
-    "zh-cn": "BAAI/bge-base-zh-v1.5",
+    "zh-tw": "paraphrase-multilingual-MiniLM-L12-v2",
+    "zh-cn": "paraphrase-multilingual-MiniLM-L12-v2",
     "en":    "paraphrase-multilingual-MiniLM-L12-v2",
 }
 _LANGUAGE_TO_DIM: dict[str, int] = {
-    "zh-tw": 768,
-    "zh-cn": 768,
+    "zh-tw": 384,
+    "zh-cn": 384,
     "en":    384,
 }
 
 # Reverse map for /v1/embeddings: model name → canonical language for embed_batch()
 # Unknown model names are rejected with 422 (no silent fallback).
+# Since zh-tw, zh-cn, and en all use the same model, the reverse map has a
+# single entry. "en" is the canonical language for this model name.
 _MODEL_TO_LANG: dict[str, str] = {
-    "BAAI/bge-base-zh-v1.5":                 "zh-tw",
     "paraphrase-multilingual-MiniLM-L12-v2": "en",
 }
 
@@ -65,7 +66,7 @@ def embed(req: EmbedRequest):
     """Generate embeddings for a list of texts.
 
     All texts are encoded with the model that corresponds to the requested
-    language (zh-tw / zh-cn use BAAI/bge-base-zh-v1.5 at 768 dim; en uses
+    language (zh-tw / zh-cn use paraphrase-multilingual-MiniLM-L12-v2 at 384 dim; en uses
     paraphrase-multilingual-MiniLM-L12-v2 at 384 dim).
 
     - Max 100 texts per request

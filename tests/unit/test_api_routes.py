@@ -38,7 +38,7 @@ class TestEmbedEndpoint:
 
     def test_passes_language_to_embed_batch(self) -> None:
         """The language from the request must be forwarded to backend.embed_batch."""
-        backend = _mock_backend([[0.1] * 768])
+        backend = _mock_backend([[0.1] * 384])
         with patch("src.api.routes.get_backend", return_value=backend):
             client.post("/embed", json={"texts": ["some text"], "language": "zh-tw"})
 
@@ -46,7 +46,7 @@ class TestEmbedEndpoint:
 
     def test_passes_zh_cn_language_to_embed_batch(self) -> None:
         """zh-cn language must be forwarded unchanged to the backend."""
-        backend = _mock_backend([[0.1] * 768])
+        backend = _mock_backend([[0.1] * 384])
         with patch("src.api.routes.get_backend", return_value=backend):
             client.post("/embed", json={"texts": ["简体中文"], "language": "zh-cn"})
 

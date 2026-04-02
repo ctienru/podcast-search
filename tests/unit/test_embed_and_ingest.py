@@ -205,7 +205,7 @@ def test_to_es_doc_includes_embedding_when_vector_provided() -> None:
     pipeline = _make_pipeline()
     _seed_caches(pipeline, "ep-vec", "podcast-episodes-zh-tw")
 
-    embedding = [0.1] * 768  # zh → 768 dim after Phase 3-A
+    embedding = [0.1] * 384
     doc = pipeline.to_es_doc({"episode_id": "ep-vec", "show_id": "show-1"}, embedding)
 
     assert doc is not None
@@ -307,7 +307,7 @@ class TestBatchEncode:
     def test_groups_same_language_into_single_embed_batch_call(self) -> None:
         """Two zh-tw episodes must be passed to embed_batch in one call (not two)."""
         mock_backend = MagicMock(spec=EmbeddingBackend)
-        mock_backend.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
+        mock_backend.embed_batch.return_value = [[0.1] * 384, [0.2] * 384]
 
         pipeline = EmbedAndIngestPipeline(
             es_service=MagicMock(),
@@ -337,7 +337,7 @@ class TestBatchEncode:
 
         def embed_batch_side_effect(texts: list[str], language: str) -> list[list[float]]:
             if language in ("zh-tw", "zh-cn"):
-                return [[0.9] * 768 for _ in texts]
+                return [[0.9] * 384 for _ in texts]
             return [[0.1] * 384 for _ in texts]
 
         mock_backend.embed_batch.side_effect = embed_batch_side_effect
@@ -362,7 +362,7 @@ class TestBatchEncode:
         inp1, vec1 = results[1]
         assert inp0["episode_id"] == "ep-zh"
         assert inp1["episode_id"] == "ep-en"
-        assert len(vec0) == 768   # zh vector
+        assert len(vec0) == 384   # zh vector
         assert len(vec1) == 384   # en vector
 
     def test_returns_empty_vectors_when_backend_is_none(self) -> None:
@@ -392,7 +392,7 @@ class TestBatchEncodeFromCache:
             storage=MagicMock(),
             from_cache=True,
         )
-        pipeline._vector_cache["ep-cached"] = [0.5] * 768
+        pipeline._vector_cache["ep-cached"] = [0.5] * 384
 
         inputs = [_make_embedding_input("ep-cached", "show-1", "some text")]
         results = pipeline.batch_encode(inputs)
@@ -400,7 +400,7 @@ class TestBatchEncodeFromCache:
         assert len(results) == 1
         inp, vec = results[0]
         assert inp["episode_id"] == "ep-cached"
-        assert vec == [0.5] * 768
+        assert vec == [0.5] * 384
         mock_backend.embed_batch.assert_not_called()
 
     def test_cache_miss_returns_empty_vector(self) -> None:
@@ -647,7 +647,7 @@ class TestStrictCache:
         """strict_cache=True: even a single miss should raise."""
         from src.pipelines.exceptions import CacheMissError
         pipeline = self._make_pipeline(strict_cache=True)
-        pipeline._vector_cache["ep-hit"] = [0.1] * 768
+        pipeline._vector_cache["ep-hit"] = [0.1] * 384
         # ep-miss has no cache entry
 
         inputs = [
@@ -674,8 +674,8 @@ class TestStrictCache:
         """strict_cache=True: no exception when all episodes have cache entries."""
         from src.pipelines.exceptions import CacheMissError
         pipeline = self._make_pipeline(strict_cache=True)
-        pipeline._vector_cache["ep-1"] = [0.5] * 768
-        pipeline._vector_cache["ep-2"] = [0.3] * 768
+        pipeline._vector_cache["ep-1"] = [0.5] * 384
+        pipeline._vector_cache["ep-2"] = [0.3] * 384
 
         inputs = [
             _make_embedding_input("ep-1", "show-1", "text one"),
@@ -699,7 +699,7 @@ class TestRunSummary:
             storage=MagicMock(),
             from_cache=True,
         )
-        pipeline._vector_cache["ep-1"] = [0.5] * 768
+        pipeline._vector_cache["ep-1"] = [0.5] * 384
         # ep-2 will be a miss
 
         inputs = [

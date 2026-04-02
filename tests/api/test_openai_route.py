@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 
-MODEL_ZH = "BAAI/bge-base-zh-v1.5"
+MODEL_ZH = "paraphrase-multilingual-MiniLM-L12-v2"
 MODEL_EN = "paraphrase-multilingual-MiniLM-L12-v2"
 
 client = TestClient(app)
@@ -28,7 +28,7 @@ class TestOpenAIEmbed:
         resp = client.post("/v1/embeddings", json={"model": MODEL_ZH, "input": "人工智慧"})
 
         assert resp.status_code == 200
-        mock.embed_batch.assert_called_once_with(["人工智慧"], "zh-tw")
+        mock.embed_batch.assert_called_once_with(["人工智慧"], "en")
 
     def test_array_input(self, mocker):
         mock = make_mock_backend(mocker, [[0.1], [0.2]])

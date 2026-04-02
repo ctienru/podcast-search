@@ -21,7 +21,7 @@ def _make_pipeline(tmp_path: Path, sync_repo=None) -> EmbedAndIngestPipeline:
 
     pipeline = EmbedAndIngestPipeline(
         es_service=MagicMock(),
-        embedding_backend=MagicMock(embed_batch=lambda texts, lang: [[0.1] * 768] * len(texts)),
+        embedding_backend=MagicMock(embed_batch=lambda texts, lang: [[0.1] * 384] * len(texts)),
         storage=MagicMock(get_shows=lambda: [], get_shows_updated_since=lambda s: []),
         sync_repo=sync_repo,
     )

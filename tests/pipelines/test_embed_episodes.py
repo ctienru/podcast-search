@@ -14,8 +14,8 @@ from src.config import settings
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-ZH_MODEL = "BAAI/bge-base-zh-v1.5"
-FAKE_VEC = [0.1] * 768
+ZH_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+FAKE_VEC = [0.1] * 384
 
 
 def _write_embedding_input(directory: Path, episode_id: str, show_id: str) -> None:
@@ -82,7 +82,7 @@ def _patch_dirs(tmp_path: Path):
 
 def _mock_backend(num_texts: int = 1):
     mock = MagicMock()
-    mock.embed_batch.side_effect = lambda texts, lang: [[0.2] * 768 for _ in texts]
+    mock.embed_batch.side_effect = lambda texts, lang: [[0.2] * 384 for _ in texts]
     return mock
 
 

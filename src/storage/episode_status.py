@@ -31,8 +31,8 @@ class EpisodeStatusRepository:
 
         Args:
             episode_ids:  Episode IDs to update.
-            model:        Embedding model name (e.g. 'BAAI/bge-base-zh-v1.5').
-            version:      Embedding version string (e.g. 'BAAI/bge-base-zh-v1.5/text-v1').
+            model:        Embedding model name (e.g. 'paraphrase-multilingual-MiniLM-L12-v2').
+            version:      Embedding version string (e.g. 'paraphrase-multilingual-MiniLM-L12-v2/text-v1').
             embedded_at:  UTC ISO timestamp of when the embedding was computed.
 
         Returns:

@@ -5,7 +5,7 @@ import pytest
 
 from src.embedding.backend import APIEmbeddingBackend, EmbeddingFallbackError
 
-MODEL_ZH = "BAAI/bge-base-zh-v1.5"
+MODEL_ZH = "paraphrase-multilingual-MiniLM-L12-v2"
 MODEL_EN = "paraphrase-multilingual-MiniLM-L12-v2"
 
 API_URL = "http://test-api/v1/embeddings"

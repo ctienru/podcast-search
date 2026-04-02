@@ -35,7 +35,7 @@ class TestLocalEmbeddingBackend:
         return mock
 
     def test_zh_tw_uses_zh_model(self) -> None:
-        """zh-tw should select the zh model (bge-zh), not the en model."""
+        """zh-tw should select the zh model key from MODEL_MAP."""
         with patch("src.embedding.backend._load_model") as mock_load:
             mock_load.return_value = self._make_mock_model()
             backend = LocalEmbeddingBackend()
@@ -53,18 +53,6 @@ class TestLocalEmbeddingBackend:
 
         calls = mock_load.call_args_list
         assert calls[0] == calls[1], "zh-tw and zh-cn must call the same model"
-
-    def test_en_uses_different_model_from_zh(self) -> None:
-        """en language must use a different model than zh-tw/zh-cn."""
-        with patch("src.embedding.backend._load_model") as mock_load:
-            mock_load.return_value = self._make_mock_model()
-            backend = LocalEmbeddingBackend()
-            backend.embed("zh text", "zh-tw")
-            backend.embed("en text", "en")
-
-        zh_model = mock_load.call_args_list[0].args[0]
-        en_model = mock_load.call_args_list[1].args[0]
-        assert zh_model != en_model
 
     def test_embed_returns_list_of_floats(self) -> None:
         """embed() must return list[float], not np.ndarray."""
@@ -120,7 +108,7 @@ class TestLocalEmbeddingBackend:
 # ── APIEmbeddingBackend ───────────────────────────────────────────────────────
 
 
-_MODEL_ZH = "BAAI/bge-base-zh-v1.5"
+_MODEL_ZH = "paraphrase-multilingual-MiniLM-L12-v2"
 _MODEL_EN = "paraphrase-multilingual-MiniLM-L12-v2"
 
 

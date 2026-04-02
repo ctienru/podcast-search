@@ -23,7 +23,7 @@ from src.types import Language
 logger = logging.getLogger(__name__)
 
 MODEL_MAP: dict[str, str] = {
-    "zh": "BAAI/bge-base-zh-v1.5",                    # 768 dim, zh-tw + zh-cn
+    "zh": "paraphrase-multilingual-MiniLM-L12-v2",  # 384 dim, zh-tw + zh-cn
     "en": "paraphrase-multilingual-MiniLM-L12-v2",    # 384 dim
 }
 
@@ -92,7 +92,7 @@ class LocalEmbeddingBackend(EmbeddingBackend):
     via _load_model's lru_cache.
 
     Language routing:
-        zh-tw, zh-cn  →  BAAI/bge-base-zh-v1.5   (768 dim)
+        zh-tw, zh-cn  →  paraphrase-multilingual-MiniLM-L12-v2   (384 dim)
         en            →  paraphrase-multilingual-MiniLM-L12-v2 (384 dim)
     """
 
