@@ -33,16 +33,23 @@ podcast-crawler
      │
      └── raw/rss/*.xml
               │
-              └─────▶ clean_episodes.py ─▶ data/cleaned/episodes/
-                             │
-                             ├─▶ embed_and_ingest.py ─────────────▶ ES episodes-{lang}
-                             │    (embed inline + route by language)
-                             │
-                             └─▶ embed_episodes.py ─▶ data/embeddings/
-                                  (Step 1: pre-compute vectors, no ES)
-                                        │
-                                        └─▶ embed_and_ingest --from-cache ─▶ ES episodes-{lang}
-                                             (Step 2: read cache, write ES)
+              └─────▶ clean_episodes.py ──────────────▶ data/cleaned/episodes/
+                                                                 │
+                             ┌───────────────────────────────────┤
+                             │                                   │
+                             ▼                                   ▼
+                   embed_and_ingest.py ──────────▶ ES    prepare_embedding_input.py
+                   (embed inline + route)                        │
+                                                                 ▼
+                                                    data/embedding_input/episodes/
+                                                                 │
+                                                                 ▼
+                                                       embed_episodes.py ──▶ data/embeddings/
+                                                       (Step 1: pre-compute vectors, no ES)
+                                                                 │
+                                                                 ▼
+                                                    embed_and_ingest --from-cache ──▶ ES episodes-{lang}
+                                                    (Step 2: read cache, write ES)
 ```
 
 ## Project Structure
@@ -70,13 +77,14 @@ podcast-search/
 │   │   ├── es_service.py        # ES bulk operations
 │   │   └── search_service.py    # BM25/kNN/Hybrid search (evaluation use)
 │   ├── pipelines/               # ETL pipelines
-│   │   ├── create_indices.py    # Create 3 language indices + aliases
-│   │   ├── ingest_shows.py      # Shows: SQLite → ES shows index
-│   │   ├── clean_episodes.py    # RSS XML → cleaned JSON
-│   │   ├── embed_episodes.py    # Cleaned JSON → embedding vectors → data/embeddings/ (no ES)
-│   │   ├── embed_and_ingest.py  # Cleaned JSON → embedding → ES episodes (or --from-cache)
-│   │   ├── exceptions.py        # Pipeline exceptions (CacheMissError)
-│   │   └── evaluate_search.py   # Search quality evaluation pipeline
+│   │   ├── create_indices.py             # Create 3 language indices + aliases
+│   │   ├── ingest_shows.py               # Shows: SQLite → ES shows index
+│   │   ├── clean_episodes.py             # RSS XML → cleaned JSON (Layer 2)
+│   │   ├── prepare_embedding_input.py    # Cleaned JSON → embedding_input JSON (Layer 3)
+│   │   ├── embed_episodes.py             # Embedding input → vectors → data/embeddings/ (no ES)
+│   │   ├── embed_and_ingest.py           # Embedding input → embedding → ES episodes (or --from-cache)
+│   │   ├── exceptions.py                 # Pipeline exceptions (CacheMissError)
+│   │   └── evaluate_search.py            # Search quality evaluation pipeline
 │   ├── embedding/
 │   │   └── backend.py           # EmbeddingBackend ABC, LocalEmbeddingBackend, APIEmbeddingBackend
 │   ├── cleaning/
@@ -155,7 +163,8 @@ Services:
 ```
 data/
 ├── crawler.db                        # SQLite from podcast-crawler v2
-├── cleaned/episodes/                 # Cleaned episode JSON (output of clean_episodes)
+├── cleaned/episodes/                 # Layer 2: cleaned episode JSON (output of clean_episodes)
+├── embedding_input/episodes/         # Layer 3: embedding text JSON (output of prepare_embedding_input)
 └── embeddings/                       # Pre-computed embedding vectors (output of embed_episodes)
 ../podcast-crawler/data/raw/rss/      # RSS XML files (shared with crawler)
 ```
@@ -175,10 +184,12 @@ python -m src.pipelines.ingest_shows
 python -m src.pipelines.clean_episodes
 
 # Step 4a — Embed and ingest inline (single step, requires local GPU/model)
+python -m src.pipelines.prepare_embedding_input               # cleaned → embedding_input
 SYNC_MODE=full python -m src.pipelines.embed_and_ingest
 
 # Step 4b — Two-step: pre-compute vectors locally, then write to remote ES
-python -m src.pipelines.embed_episodes --batch-size 512          # slow, local; writes data/embeddings/
+python -m src.pipelines.prepare_embedding_input               # cleaned → embedding_input
+python -m src.pipelines.embed_episodes --batch-size 512       # slow, local; writes data/embeddings/
 ES_HOST=<remote> SYNC_MODE=full python -m src.pipelines.embed_and_ingest --from-cache --es-chunk-size 512
 ```
 
@@ -203,6 +214,7 @@ GET shows/_count
 ```bash
 python -m src.pipelines.ingest_shows
 python -m src.pipelines.clean_episodes
+python -m src.pipelines.prepare_embedding_input   # incremental by default (skips existing)
 python -m src.pipelines.embed_and_ingest
 # SYNC_MODE defaults to "incremental" (for embed_and_ingest)
 ```
@@ -212,7 +224,10 @@ python -m src.pipelines.embed_and_ingest
 Use when the embedding model runs locally but ES is remote. Step 1 computes vectors offline and writes `embedding_status='done'` back to SQLite; Step 2 only touches the network.
 
 ```bash
-# Step 1 (local, slow): compute vectors, cache to data/embeddings/, write embedding_status='done'
+# Step 1a (local, fast): cleaned JSON → embedding_input JSON
+python -m src.pipelines.prepare_embedding_input
+
+# Step 1b (local, slow): compute vectors, cache to data/embeddings/, write embedding_status='done'
 # M4 48GB: --batch-size 512 (activations ~9GB, safe); fall back to 256 if OOM
 python -m src.pipelines.embed_episodes --batch-size 512
 
@@ -294,7 +309,7 @@ curl -X POST http://localhost:8000/embed \
 # Embed via OpenAI-compatible endpoint
 curl -X POST http://localhost:8000/v1/embeddings \
   -H "Content-Type: application/json" \
-  -d '{"input": ["artificial intelligence"], "model": "BAAI/bge-base-zh-v1.5"}'
+  -d '{"input": ["artificial intelligence"], "model": "paraphrase-multilingual-MiniLM-L12-v2"}'
 ```
 
 ## Environment Variables
@@ -380,7 +395,7 @@ Episode document:
 
 | Use case | Backend | Model |
 |----------|---------|-------|
-| Index-time (zh-tw, zh-cn) | `LocalEmbeddingBackend` | `BAAI/bge-base-zh-v1.5` (768 dim) |
+| Index-time (zh-tw, zh-cn) | `LocalEmbeddingBackend` | `paraphrase-multilingual-MiniLM-L12-v2` (384 dim) |
 | Index-time (en) | `LocalEmbeddingBackend` | `paraphrase-multilingual-MiniLM-L12-v2` (384 dim) |
 | Query-time | `APIEmbeddingBackend` (`/embed` endpoint) | Must match index-time model |
 
