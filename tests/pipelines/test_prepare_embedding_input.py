@@ -94,6 +94,16 @@ def test_build_text_empty_paragraphs() -> None:
     assert _build_embedding_text(cleaned) == "Solo Title"
 
 
+def test_build_text_empty_title_with_paragraphs() -> None:
+    cleaned = {
+        "cleaned": {
+            "normalized": {"title": ""},
+            "paragraphs": [{"text": "Body only.", "kept": True}],
+        }
+    }
+    assert _build_embedding_text(cleaned) == "Body only."
+
+
 def test_build_text_missing_cleaned_section() -> None:
     result = _build_embedding_text({})
     assert result == ""
