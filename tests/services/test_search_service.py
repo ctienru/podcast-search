@@ -25,7 +25,7 @@ def mock_es_client():
 def mock_encoder():
     """Create a mock embedding encoder."""
     encoder = MagicMock()
-    encoder.encode.return_value = np.zeros(768)
+    encoder.encode.return_value = np.zeros(384)
     return encoder
 
 

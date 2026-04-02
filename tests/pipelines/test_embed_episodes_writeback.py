@@ -54,7 +54,7 @@ class TestEmbedEpisodesWriteback:
         monkeypatch.setattr("src.pipelines.embed_episodes.CLEANED_EPISODES_DIR", cleaned_dir)
 
         mock_backend = MagicMock()
-        mock_backend.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
+        mock_backend.embed_batch.return_value = [[0.1] * 384, [0.2] * 384]
 
         mock_repo = MagicMock(spec=EpisodeStatusRepository)
         mock_db = MagicMock()
@@ -78,7 +78,7 @@ class TestEmbedEpisodesWriteback:
         monkeypatch.setattr("src.pipelines.embed_episodes.CLEANED_EPISODES_DIR", cleaned_dir)
 
         mock_backend = MagicMock()
-        mock_backend.embed_batch.return_value = [[0.1] * 768]
+        mock_backend.embed_batch.return_value = [[0.1] * 384]
 
         with patch("src.pipelines.embed_episodes.LocalEmbeddingBackend", return_value=mock_backend):
             stats = run(cache_dir=cache_dir, db=None)
@@ -94,7 +94,7 @@ class TestEmbedEpisodesWriteback:
         monkeypatch.setattr("src.pipelines.embed_episodes.CLEANED_EPISODES_DIR", cleaned_dir)
 
         mock_backend = MagicMock()
-        mock_backend.embed_batch.return_value = [[0.1] * 768]
+        mock_backend.embed_batch.return_value = [[0.1] * 384]
 
         mock_repo = MagicMock(spec=EpisodeStatusRepository)
         mock_db = MagicMock()
