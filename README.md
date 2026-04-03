@@ -328,10 +328,11 @@ curl -X POST http://localhost:8000/v1/embeddings \
 | `CLICK_LOG_PATH` | `logs/click_log.jsonl` | Click behavioral log |
 | `INGEST_CURSOR_PATH` | `data/ingest_cursor.json` | Incremental ingest cursor |
 | `ENABLE_LANGUAGE_SPLIT` | `true` | Use 3-index language-split layout (v2 default) |
+| `EMBEDDING_STRATEGY` | `local` | Embedding backend: `local` (SentenceTransformer) or `api` (external HTTP) |
 | `EMBEDDING_CACHE_DIR` | `data/embeddings` | Vector cache dir (written by `embed_episodes`, read by `embed_and_ingest --from-cache`) |
 | `EMBEDDING_TEXT_VERSION` | `text-v1` | Embedding text assembly version; bump when the text format changes |
-| `EMBEDDING_API_URL` | — | External embedding API URL (Phase 3-B) |
-| `EMBEDDING_API_KEY` | — | External embedding API key (Phase 3-B) |
+| `EMBEDDING_API_URL` | — | External embedding API URL (required when `EMBEDDING_STRATEGY=api`) |
+| `EMBEDDING_API_KEY` | — | External embedding API key (required when `EMBEDDING_STRATEGY=api`) |
 
 ## ES Index Structure
 
