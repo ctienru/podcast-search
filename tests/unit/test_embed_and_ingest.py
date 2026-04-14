@@ -119,6 +119,7 @@ def test_emit_ingest_log_handles_zero_total(caplog) -> None:
 
 def _make_pipeline() -> EmbedAndIngestPipeline:
     return EmbedAndIngestPipeline(
+        environment="default",
         es_service=MagicMock(),
         embedding_backend=MagicMock(spec=EmbeddingBackend),
         routing_strategy=LanguageSplitRoutingStrategy(),
@@ -310,6 +311,7 @@ class TestBatchEncode:
         mock_backend.embed_batch.return_value = [[0.1] * 384, [0.2] * 384]
 
         pipeline = EmbedAndIngestPipeline(
+            environment="default",
             es_service=MagicMock(),
             embedding_backend=mock_backend,
             routing_strategy=LanguageSplitRoutingStrategy(),
@@ -343,6 +345,7 @@ class TestBatchEncode:
         mock_backend.embed_batch.side_effect = embed_batch_side_effect
 
         pipeline = EmbedAndIngestPipeline(
+            environment="default",
             es_service=MagicMock(),
             embedding_backend=mock_backend,
             routing_strategy=LanguageSplitRoutingStrategy(),
@@ -368,6 +371,7 @@ class TestBatchEncode:
     def test_returns_empty_vectors_when_backend_is_none(self) -> None:
         """BM25-only mode: batch_encode returns (input, []) for every item."""
         pipeline = EmbedAndIngestPipeline(
+            environment="default",
             es_service=MagicMock(),
             embedding_backend=None,
             routing_strategy=LanguageSplitRoutingStrategy(),
@@ -386,6 +390,7 @@ class TestBatchEncodeFromCache:
         """from_cache=True: episode in _vector_cache → cached vector returned, backend not called."""
         mock_backend = MagicMock(spec=EmbeddingBackend)
         pipeline = EmbedAndIngestPipeline(
+            environment="default",
             es_service=MagicMock(),
             embedding_backend=mock_backend,
             routing_strategy=LanguageSplitRoutingStrategy(),
@@ -406,6 +411,7 @@ class TestBatchEncodeFromCache:
     def test_cache_miss_returns_empty_vector(self) -> None:
         """from_cache=True: episode not in _vector_cache → empty vector (BM25-only update path)."""
         pipeline = EmbedAndIngestPipeline(
+            environment="default",
             es_service=MagicMock(),
             embedding_backend=None,
             routing_strategy=LanguageSplitRoutingStrategy(),
@@ -621,6 +627,7 @@ class TestUpsertByShowId:
 class TestStrictCache:
     def _make_pipeline(self, strict_cache: bool = True) -> EmbedAndIngestPipeline:
         return EmbedAndIngestPipeline(
+            environment="default",
             es_service=MagicMock(),
             embedding_backend=None,
             routing_strategy=LanguageSplitRoutingStrategy(),
@@ -693,6 +700,7 @@ class TestRunSummary:
     def test_batch_encode_tracks_cache_hit_and_miss_counts(self) -> None:
         """batch_encode() increments _cache_hits/_cache_misses when from_cache=True."""
         pipeline = EmbedAndIngestPipeline(
+            environment="default",
             es_service=MagicMock(),
             embedding_backend=None,
             routing_strategy=LanguageSplitRoutingStrategy(),
@@ -714,6 +722,7 @@ class TestRunSummary:
     def test_run_stats_include_cache_counters(self) -> None:
         """run() stats dict must include cache_hits and cache_misses keys."""
         pipeline = EmbedAndIngestPipeline(
+            environment="default",
             es_service=MagicMock(),
             embedding_backend=None,
             routing_strategy=LanguageSplitRoutingStrategy(),

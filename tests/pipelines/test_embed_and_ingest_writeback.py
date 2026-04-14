@@ -20,6 +20,7 @@ def _make_pipeline(tmp_path: Path, sync_repo=None) -> EmbedAndIngestPipeline:
     cleaned_dir.mkdir(parents=True)
 
     pipeline = EmbedAndIngestPipeline(
+        environment="default",
         es_service=MagicMock(),
         embedding_backend=MagicMock(embed_batch=lambda texts, lang: [[0.1] * 384] * len(texts)),
         storage=MagicMock(get_shows=lambda: [], get_shows_updated_since=lambda s: []),
@@ -93,7 +94,13 @@ class TestWritebackSyncState:
             assert c.kwargs["index_alias"] == "episodes-zh-tw"
             assert c.kwargs["environment"] == "default"
 
-    def test_mark_done_not_called_for_failed_episodes(self, tmp_path):
+    def test_mark_done_all_or_nothing_on_partial_failure(self, tmp_path):
+        """Phase 1 R3: any doc error → zero mark_done calls (all-or-nothing).
+
+        Replaces the pre-Phase-1 `test_mark_done_not_called_for_failed_episodes`
+        which asserted partial flush (succeeded docs still flushed). Phase 1
+        tightens this to all-or-nothing: if ANY doc fails, NO rows are flushed.
+        """
         sync_repo = MagicMock(spec=SyncStateRepository)
         sync_repo._db = MagicMock()
 
@@ -109,8 +116,8 @@ class TestWritebackSyncState:
         with patch("src.pipelines.embed_and_ingest.streaming_bulk", side_effect=_fake_bulk(mixed_items)):
             pipeline.run()
 
-        assert sync_repo.mark_done.call_count == 1
-        assert sync_repo.mark_done.call_args.kwargs["entity_id"] == "ep:001"
+        assert sync_repo.mark_done.call_count == 0
+        sync_repo.commit.assert_not_called()
 
     def test_no_sync_repo_does_not_raise(self, tmp_path):
         pipeline = _make_pipeline(tmp_path, sync_repo=None)
@@ -123,13 +130,28 @@ class TestWritebackSyncState:
 
         assert stats["success"] == 1
 
-    def test_environment_passed_from_settings(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.pipelines.embed_and_ingest.settings.ES_ENV", "local")
+    def test_environment_passed_from_constructor(self, tmp_path):
+        """Phase 1: environment is caller-injected via constructor, not read from settings.
 
+        Replaces the pre-Phase-1 `test_environment_passed_from_settings` which
+        monkeypatched `settings.ES_ENV` — that path is removed in Phase 1.
+        """
         sync_repo = MagicMock(spec=SyncStateRepository)
         sync_repo._db = MagicMock()
 
-        pipeline = _make_pipeline(tmp_path, sync_repo=sync_repo)
+        embedding_input_dir = tmp_path / "embedding_input" / "episodes"
+        embedding_input_dir.mkdir(parents=True)
+        (tmp_path / "cleaned" / "episodes").mkdir(parents=True)
+
+        pipeline = EmbedAndIngestPipeline(
+            environment="local",
+            es_service=MagicMock(),
+            embedding_backend=MagicMock(embed_batch=lambda texts, lang: [[0.1] * 384] * len(texts)),
+            storage=MagicMock(get_shows=lambda: [], get_shows_updated_since=lambda s: []),
+            sync_repo=sync_repo,
+        )
+        pipeline.EMBEDDING_INPUT_DIR = embedding_input_dir
+        pipeline.CLEANED_EPISODES_DIR = tmp_path / "cleaned" / "episodes"
         _add_episode(pipeline, "ep:001", "show:1")
 
         ok_items = [(True, {"index": {"_id": "ep:001", "_index": "episodes-zh-tw-v3"}})]
