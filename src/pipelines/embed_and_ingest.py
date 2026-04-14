@@ -679,6 +679,13 @@ class EmbedAndIngestPipeline:
                     extra={"count": len(successful_ids), "environment": self._environment},
                 )
             except Exception as exc:
+                # Release any partial writes held in SQLite's implicit transaction.
+                # Without this, a long-lived connection would carry stale pending
+                # rows into the next caller's commit() and silently break R3.
+                try:
+                    self._sync_repo._db.conn.rollback()
+                except Exception:
+                    logger.exception("flush_rollback_failed")
                 errors.append({"type": "flush_exception", "error": repr(exc)})
                 logger.exception("flush_exception")
 

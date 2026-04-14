@@ -346,6 +346,9 @@ class TestCliExitPropagation:
         # Patch SyncStateRepository construction in CLI run() so we get our in-memory repo
         monkeypatch.setattr(mod, "SyncStateRepository", lambda db: repo)
         monkeypatch.setattr(mod, "Database", lambda path: MagicMock())
+        # CI has no real SQLITE_PATH; short-circuit create_storage() so run_incremental
+        # doesn't try to open a non-existent DB file before the mocked Pipeline runs.
+        monkeypatch.setattr(mod, "create_storage", lambda: MagicMock())
 
         with patch.object(mod, "EmbedAndIngestPipeline") as MockP:
             inst = MagicMock()
@@ -369,6 +372,7 @@ class TestCliExitPropagation:
         monkeypatch.setattr(sys, "argv", ["embed_and_ingest", "--force-full"])
         monkeypatch.setattr(mod, "SyncStateRepository", lambda db: _make_sync_repo())
         monkeypatch.setattr(mod, "Database", lambda path: MagicMock())
+        monkeypatch.setattr(mod, "create_storage", lambda: MagicMock())
 
         with patch.object(mod, "EmbedAndIngestPipeline") as MockP:
             inst = MagicMock()
