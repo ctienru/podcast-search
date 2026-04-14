@@ -14,11 +14,46 @@ Usage:
     python -m src.pipelines.embed_and_ingest --force-full              # ignore cursor
     python -m src.pipelines.embed_and_ingest --show-id <id>            # SYNC_MODE=single
     python -m src.pipelines.embed_and_ingest --show-ids id1 id2 id3    # process specific shows
+
+Ingest Commit Semantics
+(Phase 1 scope: daily incremental path only; NOT a module-wide guarantee)
+-------------------------------------------------------------------------
+The daily incremental path (`run_incremental` + `EmbedAndIngestPipeline.run()`)
+follows a strict commit boundary (spec R1–R7):
+
+- `ingest_cursor.json` is written exactly ONCE, at the end of a fully successful run
+- On any partial failure (mixed success/error in `pipeline.run()` stats), cursor is NOT advanced
+- `search_sync_state` flush is all-or-nothing: if any error occurred, no row is marked 'synced'
+- On an empty candidate set (no shows updated since cursor), BOTH `last_ingest_at` and
+  `last_run_at` are frozen — no-op run leaves zero footprint on the cursor
+- `search_sync_state` writes use the `environment` value passed to the pipeline's
+  constructor; the daily incremental path injects `'local'` (architecture rule §3.1.1).
+  The class no longer reads `settings.ES_ENV` directly.
+- The daily CLI path (`SYNC_MODE=incremental` or `--force-full`) propagates non-zero
+  exit code on any ingest error. `SYNC_MODE=single` / `SYNC_MODE=backfill` paths
+  retain pre-Phase-1 exit semantics:
+  - `backfill` is a thin wrapper around `run_incremental(force_full=True)`, so it
+    inherits this phase's all-or-nothing / cursor-freeze behavior as a side effect,
+    and its sync_state writes are now pinned to `environment='local'`
+  - `single` (via `upsert_by_show_id`) is NOT covered by Sev0 correctness yet
+
+Re-run safety depends on idempotent ES upsert (same `_id = episode_id`, no
+non-deterministic fields). Verified by Step 0 + integration test.
+
+Transaction boundary is owned by the pipeline layer (this module).
+`SyncStateRepository` remains a dumb write API; do NOT introduce auto-commit there
+or this guarantee breaks.
+
+Errors counter coverage assumption (A1): `stats["errors"]` is treated as a step-level
+gate. The `run()` method funnels bulk/transform/flush exceptions into `errors` so
+the gate remains honest; if new failure modes are added, they MUST be funnelled too
+or the all-or-nothing guarantee is silently broken.
 """
 
 import argparse
 import json
 import logging
+import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -103,6 +138,8 @@ class EmbedAndIngestPipeline:
 
     def __init__(
         self,
+        *,
+        environment: str,
         es_service: Optional[ElasticsearchService] = None,
         embedding_backend: Optional[EmbeddingBackend] = None,
         batch_size: int = 64,
@@ -116,6 +153,7 @@ class EmbedAndIngestPipeline:
         sync_repo: Optional[SyncStateRepository] = None,
         es_chunk_size: int = 500,
     ) -> None:
+        self._environment = environment
         self.es = es_service or ElasticsearchService()
         self.batch_size = batch_size  # default raised to 64 for better GPU/MPS utilisation
         self._es_chunk_size = es_chunk_size
@@ -587,41 +625,62 @@ class EmbedAndIngestPipeline:
 
         # Run bulk ingest
         success = 0
-        errors = []
+        errors: list = []
         successful_ids: list[str] = []
 
-        with tqdm(desc="Syncing to ES", unit="ep") as pbar:
-            for ok, item in streaming_bulk(
-                self.es.client,
-                self.build_actions(self.load_embedding_inputs()),
-                chunk_size=self._es_chunk_size,
-                raise_on_error=False,
-            ):
-                if ok:
-                    success += 1
-                    op_type = next(iter(item))
-                    ep_id = item[op_type].get("_id")
-                    if ep_id:
-                        successful_ids.append(ep_id)
-                else:
-                    errors.append(item)
-                pbar.update(1)
-                pbar.set_postfix(ok=success, err=len(errors))
+        # §4.0 Error funneling: wrap bulk + transform to ensure A1 coverage.
+        # streaming_bulk(client, self.build_actions(...), ...) — argument evaluation
+        # happens inside the try, so transform-time errors (build_actions /
+        # load_embedding_inputs raising) are also caught here.
+        try:
+            with tqdm(desc="Syncing to ES", unit="ep") as pbar:
+                for ok, item in streaming_bulk(
+                    self.es.client,
+                    self.build_actions(self.load_embedding_inputs()),
+                    chunk_size=self._es_chunk_size,
+                    raise_on_error=False,
+                ):
+                    if ok:
+                        success += 1
+                        op_type = next(iter(item))
+                        ep_id = item[op_type].get("_id")
+                        if ep_id:
+                            successful_ids.append(ep_id)
+                    else:
+                        errors.append(item)
+                    pbar.update(1)
+                    pbar.set_postfix(ok=success, err=len(errors))
+        except Exception as exc:
+            errors.append({"type": "bulk_or_transform_exception", "error": repr(exc)})
+            logger.exception("bulk_or_transform_exception")
 
-        if successful_ids and self._sync_repo is not None:
-            for ep_id in successful_ids:
-                alias = self._episode_aliases.get(ep_id, "")
-                self._sync_repo.mark_done(
-                    entity_type="episode",
-                    entity_id=ep_id,
-                    index_alias=alias,
-                    environment=settings.ES_ENV,
-                )
-            self._sync_repo.commit()
-            logger.info(
-                "writeback_complete",
-                extra={"count": len(successful_ids), "environment": settings.ES_ENV},
+        # §4.2 R3 all-or-nothing flush: any step-level error → no sync_state writeback.
+        if errors:
+            logger.warning(
+                "sync_state_flush_skipped_due_to_errors",
+                extra={
+                    "error_count": len(errors),
+                    "would_have_flushed": len(successful_ids),
+                },
             )
+        elif successful_ids and self._sync_repo is not None:
+            try:
+                for ep_id in successful_ids:
+                    alias = self._episode_aliases.get(ep_id, "")
+                    self._sync_repo.mark_done(
+                        entity_type="episode",
+                        entity_id=ep_id,
+                        index_alias=alias,
+                        environment=self._environment,
+                    )
+                self._sync_repo.commit()
+                logger.info(
+                    "writeback_complete",
+                    extra={"count": len(successful_ids), "environment": self._environment},
+                )
+            except Exception as exc:
+                errors.append({"type": "flush_exception", "error": repr(exc)})
+                logger.exception("flush_exception")
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 
@@ -748,12 +807,9 @@ def run_incremental(
         since = min(since_values) if since_values else ""
         updated = list(_storage.get_shows_updated_since(since))
         if not updated:
-            logger.info("incremental_no_updates", extra={"since": since})
-            _cursor_aliases = _ALIASES if settings.ENABLE_LANGUAGE_SPLIT else (_LEGACY_ALIAS,)
-            save_cursor(
-                {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _cursor_aliases},
-                cursor_path,
-            )
+            # Phase 1 R7: no-op run leaves zero footprint on the cursor —
+            # both last_ingest_at and last_run_at are frozen.
+            logger.info("incremental_no_updates_noop", extra={"since": since})
             return {"success": 0, "errors": 0, "total": 0}
         updated_ids = {show.show_id for show in updated}
         _allowed_show_ids = (
@@ -762,6 +818,7 @@ def run_incremental(
         logger.info("incremental_updated_shows", extra={"count": len(_allowed_show_ids), "since": since})
 
     pipeline = EmbedAndIngestPipeline(
+        environment="local",  # §3.1.1 rule F: daily ingest path writes sync_state under 'local'
         storage=_storage,
         routing_strategy=routing or LanguageSplitRoutingStrategy(),
         embedding_backend=_backend,
@@ -776,11 +833,19 @@ def run_incremental(
     )
     stats = pipeline.run()
 
-    _cursor_aliases = _ALIASES if settings.ENABLE_LANGUAGE_SPLIT else (_LEGACY_ALIAS,)
-    save_cursor(
-        {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _cursor_aliases},
-        cursor_path,
-    )
+    # Phase 1 R1: cursor advances only when the whole step succeeded.
+    # Sev0 fix: partial failure must not advance cursor.
+    if stats.get("errors", 0) == 0:
+        _cursor_aliases = _ALIASES if settings.ENABLE_LANGUAGE_SPLIT else (_LEGACY_ALIAS,)
+        save_cursor(
+            {alias: IngestCursor(last_ingest_at=now, last_run_at=now) for alias in _cursor_aliases},
+            cursor_path,
+        )
+    else:
+        logger.warning(
+            "cursor_not_advanced_due_to_errors",
+            extra={"error_count": stats["errors"], "success_count": stats.get("success", 0)},
+        )
     return stats
 
 
@@ -868,6 +933,7 @@ def upsert_by_show_id(
     )
 
     pipeline = EmbedAndIngestPipeline(
+        environment=settings.ES_ENV,  # single/upsert path keeps legacy behavior; Phase 1 scope excludes this
         storage=_storage,
         routing_strategy=routing or LanguageSplitRoutingStrategy(),
         embedding_backend=_backend,
@@ -980,9 +1046,11 @@ def run() -> None:
             es_chunk_size=args.es_chunk_size,
         )
     else:
-        # incremental (default) or full
+        # incremental (default) or full — Phase 1 daily path.
+        # Sev0 fix: propagate non-zero exit when any ingest error occurred.
+        # single / backfill branches retain pre-Phase-1 exit semantics.
         show_ids_filter = set(args.show_ids) if args.show_ids else None
-        run_incremental(
+        stats = run_incremental(
             embedding_backend=backend,
             force_full=(mode == "full" or args.force_full),
             batch_size=args.batch_size,
@@ -993,6 +1061,12 @@ def run() -> None:
             sync_repo=_sync_repo,
             es_chunk_size=args.es_chunk_size,
         )
+        if stats and stats.get("errors", 0) > 0:
+            logger.error(
+                "exit_nonzero_due_to_ingest_errors",
+                extra={"errors": stats["errors"], "success": stats.get("success", 0)},
+            )
+            sys.exit(1)
 
 
 if __name__ == "__main__":
