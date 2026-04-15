@@ -902,7 +902,12 @@ class EmbedAndIngestPipeline:
                 if not show_episode_ids:
                     continue
                 try:
-                    self._episode_status_repo.mark_embedding_metadata_only(
+                    # Phase 2b-A V1e-A: daily path now writes
+                    # embedding_status='done' at the artifact-ready
+                    # commit boundary. The loop guards above ensure
+                    # this only fires for rebuild_ok + show_bulk_ok
+                    # shows (never cache-hit-only; see Step 6 scope).
+                    self._episode_status_repo.mark_embedded_daily(
                         episode_ids=show_episode_ids,
                         model=rebuild_result.identity_used.model_name,
                         version=rebuild_result.identity_used.embedding_version,
