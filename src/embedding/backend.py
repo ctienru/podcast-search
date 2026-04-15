@@ -18,14 +18,10 @@ from functools import lru_cache
 import httpx
 from sentence_transformers import SentenceTransformer
 
+from src.pipelines.embedding_catalog import MODEL_MAP  # re-export (Phase 2a: catalog is authoritative)
 from src.types import Language
 
 logger = logging.getLogger(__name__)
-
-MODEL_MAP: dict[str, str] = {
-    "zh": "paraphrase-multilingual-MiniLM-L12-v2",  # 384 dim, zh-tw + zh-cn
-    "en": "paraphrase-multilingual-MiniLM-L12-v2",    # 384 dim
-}
 
 
 @lru_cache(maxsize=None)

@@ -44,7 +44,12 @@ from sqlite_utils import Database
 from tqdm import tqdm
 
 from src.config import settings
-from src.embedding.backend import LocalEmbeddingBackend, MODEL_MAP
+from src.embedding.backend import LocalEmbeddingBackend
+from src.pipelines.embedding_catalog import MODEL_MAP
+from src.pipelines.embedding_identity import resolve_expected_identity
+from src.pipelines.embedding_paths import cache_path_for, validate_cache_identity
+from src.pipelines.embedding_runtime import embed_texts
+from src.pipelines.embedding_text import TextChunk, prepare_chunks_for_show
 from src.storage.episode_status import EpisodeStatusRepository
 from src.types import Language
 from src.utils.logging import setup_logging
@@ -154,10 +159,6 @@ def _model_key_for_language(lang: Language) -> str:
     return _LANGUAGE_TO_MODEL_KEY.get(lang, "en")
 
 
-def _cache_path(show_id: str, cache_dir: Path) -> Path:
-    return cache_dir / f"{show_id}.json"
-
-
 def _load_existing_cache(path: Path) -> Optional[Dict]:
     if not path.exists():
         return None
@@ -230,10 +231,18 @@ def run(
     )
 
     # Warm up MPS JIT before the main loop so tqdm's time estimate is not
-    # thrown off by the first-call Metal compilation overhead.
+    # thrown off by the first-call Metal compilation overhead. Route through
+    # the runtime primitive so dimension self-validation fires on the first
+    # ever encoder output (fail loud before any cache is written).
     print("Warming up embedding model...", flush=True)
-    backend.embed_batch(["warmup"], "zh-tw")
-    backend.embed_batch(["warmup"], "en")
+    for warm_lang in ("zh-tw", "en"):
+        embed_texts(
+            texts=["warmup"],
+            language=warm_lang,
+            identity=resolve_expected_identity(language=warm_lang),
+            backend=backend,
+            batch_size=batch_size,
+        )
     print("  Ready.", flush=True)
 
     stats = {"written": 0, "skipped": 0, "failed": 0, "excluded": excluded, "total": total}
@@ -241,7 +250,6 @@ def run(
     with tqdm(total=total, desc="Embedding episodes", unit="ep") as pbar:
         for show_id, inputs in inputs_by_show.items():
             show_episode_count = len(inputs)
-            out_path = _cache_path(show_id, _cache_dir)
 
             # Prefer SQLite show.target_index: it is the source of truth for v2
             # routing and avoids false failures when older cleaned JSON files do
@@ -260,20 +268,23 @@ def run(
                 pbar.update(show_episode_count)
                 continue
 
+            # Phase 2a: resolve identity once per show and use it for both the
+            # cache path (versioned slug) and the cache-hit validation.
+            show_identity = resolve_expected_identity(language=lang)
             model_key = _model_key_for_language(lang)
-            model_name = MODEL_MAP[model_key]
+            out_path = cache_path_for(_cache_dir, show_identity, show_id)
 
-            # Load existing cache (if valid) and find which episodes are missing.
-            embedding_version = f"{model_name}/{settings.EMBEDDING_TEXT_VERSION}"
+            # Load existing cache and keep only entries that match the expected
+            # identity on all three fields plus vector length. A mismatch means
+            # the cache was written under a different identity — treat it as a
+            # full re-embed rather than trusting stale vectors.
             existing_episodes: Dict[str, list] = {}
             if not force:
                 existing = _load_existing_cache(out_path)
-                if (
-                    existing
-                    and existing.get("model_name") == model_name
-                    and existing.get("embedding_version") == embedding_version
-                ):
-                    existing_episodes = existing.get("episodes", {})
+                if existing is not None:
+                    mismatch = validate_cache_identity(existing, show_identity)
+                    if mismatch is None:
+                        existing_episodes = existing.get("episodes", {})
 
             cached_ids = set(existing_episodes)
             inputs_to_embed = [inp for inp in inputs if inp.get("episode_id") not in cached_ids]
@@ -287,40 +298,54 @@ def run(
 
             stats["skipped"] += already_cached_count
 
-            # Group only the uncached inputs by language.
-            lang_groups: Dict[Language, list] = defaultdict(list)
+            # Phase 2a: produce chunks via the shared text primitive so that
+            # embed_episodes and show_rebuild cannot diverge on chunking.
+            # `show_identity` is already resolved above (used for the cache path).
+            chunks = prepare_chunks_for_show(
+                show_id=show_id,
+                episode_inputs=inputs_to_embed,
+                identity=show_identity,
+            )
+
+            # Group chunks by language — language drives backend model
+            # selection at encode time and may differ from the show's
+            # default when cleaned_cache fallback resolves per episode.
+            chunks_by_lang: Dict[Language, list[TextChunk]] = defaultdict(list)
             missing_lang_count = 0
             if raw_show_target:
-                lang_groups[lang] = list(inputs_to_embed)
+                chunks_by_lang[lang] = list(chunks)
             else:
-                for inp in inputs_to_embed:
-                    ep_lang = _language_for_episode(inp.get("episode_id", ""), cleaned_cache)
+                for chunk in chunks:
+                    ep_lang = _language_for_episode(chunk.episode_id, cleaned_cache)
                     if ep_lang:
-                        lang_groups[ep_lang].append(inp)
+                        chunks_by_lang[ep_lang].append(chunk)
                     else:
                         missing_lang_count += 1
                         logger.debug(
                             "embed_episodes_episode_skipped_no_lang",
-                            extra={"episode_id": inp.get("episode_id")},
+                            extra={"episode_id": chunk.episode_id},
                         )
 
             if missing_lang_count:
                 stats["failed"] += missing_lang_count
 
             episodes_vectors: Dict[str, list] = {}
-            expected_vectors = sum(len(group) for group in lang_groups.values())
+            expected_vectors = sum(len(group) for group in chunks_by_lang.values())
 
-            for ep_lang, lang_inputs in lang_groups.items():
-                texts = [inp["embedding_input"]["text"] for inp in lang_inputs]
-                episode_ids = [inp["episode_id"] for inp in lang_inputs]
-
-                # Encode in batches.
-                for start in range(0, len(texts), batch_size):
-                    batch_texts = texts[start : start + batch_size]
-                    batch_ids = episode_ids[start : start + batch_size]
-                    vectors = backend.embed_batch(batch_texts, ep_lang)
-                    for ep_id, vec in zip(batch_ids, vectors):
-                        episodes_vectors[ep_id] = vec
+            # Runtime primitive performs WV1 dim self-validation; any violation
+            # raises EmbeddingDimensionContractViolation (systemic halt).
+            for ep_lang, lang_chunks in chunks_by_lang.items():
+                lang_identity = resolve_expected_identity(language=ep_lang)
+                texts = [chunk.text for chunk in lang_chunks]
+                vectors = embed_texts(
+                    texts=texts,
+                    language=ep_lang,
+                    identity=lang_identity,
+                    backend=backend,
+                    batch_size=batch_size,
+                )
+                for chunk, vec in zip(lang_chunks, vectors):
+                    episodes_vectors[chunk.episode_id] = vec
 
             if not episodes_vectors:
                 logger.warning("embed_episodes_no_vectors", extra={"show_id": show_id})
@@ -338,13 +363,15 @@ def run(
             cache_entry = {
                 "show_id": show_id,
                 "model_key": model_key,
-                "model_name": model_name,
-                "embedding_version": embedding_version,
+                "model_name": show_identity.model_name,
+                "embedding_version": show_identity.embedding_version,
+                "embedding_dimensions": show_identity.embedding_dimensions,
                 "embedded_at": datetime.now(timezone.utc).isoformat(),
                 "episodes": merged_episodes,
             }
 
             try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(out_path, "w", encoding="utf-8") as f:
                     json.dump(cache_entry, f)
                 stats["written"] += len(episodes_vectors)  # only newly computed
@@ -352,8 +379,8 @@ def run(
                 if ep_repo is not None and episodes_vectors:
                     ep_repo.mark_embedded_batch(
                         list(episodes_vectors.keys()),
-                        model=model_name,
-                        version=embedding_version,
+                        model=show_identity.model_name,
+                        version=show_identity.embedding_version,
                         embedded_at=cache_entry["embedded_at"],
                     )
             except Exception as e:
