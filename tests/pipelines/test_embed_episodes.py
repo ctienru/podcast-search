@@ -8,14 +8,26 @@ import pytest
 from sqlite_utils import Database
 
 import src.pipelines.embed_episodes as embed_ep
-from src.pipelines.embed_episodes import run
 from src.config import settings
+from src.pipelines.embed_episodes import run
+from src.pipelines.embedding_identity import EmbeddingIdentity, resolve_expected_identity
+from src.pipelines.embedding_paths import cache_path_for
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 ZH_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 FAKE_VEC = [0.1] * 384
+
+
+def _zh_identity() -> EmbeddingIdentity:
+    """The identity embed_episodes resolves for zh-tw shows under current config."""
+    return resolve_expected_identity(language="zh-tw")
+
+
+def _versioned_cache_path(cache_dir: Path, show_id: str, identity: EmbeddingIdentity | None = None) -> Path:
+    """Resolve the versioned cache path for a show under the given identity."""
+    return cache_path_for(cache_dir, identity or _zh_identity(), show_id)
 
 
 def _write_embedding_input(directory: Path, episode_id: str, show_id: str) -> None:
@@ -49,23 +61,41 @@ def _write_cache(
     episode_ids: list[str],
     model_name: str = ZH_MODEL,
     embedding_version: str | None = None,
+    embedding_dimensions: int = 384,
 ) -> None:
-    """Write a cache file. embedding_version defaults to the current settings value."""
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    version = embedding_version if embedding_version is not None else f"{model_name}/{settings.EMBEDDING_TEXT_VERSION}"
+    """Write a cache file under the zh-identity versioned slug.
+
+    Phase 2a: cache path comes from `cache_path_for(cache_dir, identity,
+    show_id)`. The helper writes under the *current expected* slug so that
+    `embed_episodes.run()` picks it up when it resolves identity for the
+    show. Arbitrary `embedding_version` / `model_name` / dims can still be
+    passed so tests can simulate mismatches — validate_cache_identity
+    will then flag the mismatch and trigger a re-embed.
+    """
+    expected = _zh_identity()
+    path = cache_path_for(cache_dir, expected, show_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    version = (
+        embedding_version
+        if embedding_version is not None
+        else settings.EMBEDDING_TEXT_VERSION  # Phase 2a cleaned form
+    )
     entry = {
         "show_id": show_id,
         "model_key": "zh",
         "model_name": model_name,
         "embedding_version": version,
+        "embedding_dimensions": embedding_dimensions,
         "embedded_at": "2026-03-26T00:00:00+00:00",
         "episodes": {ep_id: FAKE_VEC for ep_id in episode_ids},
     }
-    (cache_dir / f"{show_id}.json").write_text(json.dumps(entry), encoding="utf-8")
+    path.write_text(json.dumps(entry), encoding="utf-8")
 
 
-def _read_cache(cache_dir: Path, show_id: str) -> dict:
-    return json.loads((cache_dir / f"{show_id}.json").read_text(encoding="utf-8"))
+def _read_cache(cache_dir: Path, show_id: str, identity: EmbeddingIdentity | None = None) -> dict:
+    return json.loads(
+        _versioned_cache_path(cache_dir, show_id, identity).read_text(encoding="utf-8")
+    )
 
 
 def _patch_dirs(tmp_path: Path):
@@ -244,8 +274,8 @@ def test_show_id_filter(tmp_path: Path) -> None:
         stats = run(allowed_show_ids={"show-A"}, cache_dir=cache_dir)
 
     assert stats["written"] == 1
-    assert (cache_dir / "show-A.json").exists()
-    assert not (cache_dir / "show-B.json").exists()
+    assert _versioned_cache_path(cache_dir, "show-A").exists()
+    assert not _versioned_cache_path(cache_dir, "show-B").exists()
 
 
 def test_missing_language_counts_as_failed(tmp_path: Path) -> None:
@@ -328,8 +358,13 @@ def test_embedding_version_mismatch_triggers_full_reembed(tmp_path: Path) -> Non
     _assert_real_embed_calls(mock_backend, 1)
 
 
-def test_written_cache_contains_embedding_version(tmp_path: Path) -> None:
-    """Newly written cache JSON must include embedding_version field."""
+def test_written_cache_contains_three_identity_fields(tmp_path: Path) -> None:
+    """Phase 2a: written cache must carry the three-field embedding identity.
+
+    Previously the cache wrote a legacy `<model>/<text-version>` composite
+    into `embedding_version`; Phase 2a splits that into three independent
+    fields so `validate_cache_identity` can compare each on its own.
+    """
     p_input, p_cleaned, ei_dir, cl_dir = _patch_dirs(tmp_path)
     cache_dir = tmp_path / "embeddings"
     mock_backend = _mock_backend()
@@ -341,5 +376,66 @@ def test_written_cache_contains_embedding_version(tmp_path: Path) -> None:
         run(cache_dir=cache_dir)
 
     cached = _read_cache(cache_dir, "show-A")
-    expected_version = f"{ZH_MODEL}/{settings.EMBEDDING_TEXT_VERSION}"
-    assert cached["embedding_version"] == expected_version
+    expected = _zh_identity()
+    assert cached["model_name"] == expected.model_name
+    assert cached["embedding_version"] == expected.embedding_version  # cleaned, no "/" prefix
+    assert cached["embedding_dimensions"] == expected.embedding_dimensions
+
+
+def test_cache_written_at_versioned_slug_path(tmp_path: Path) -> None:
+    """Phase 2a: cache path is `<cache_dir>/<slug>/<show_id>.json`.
+
+    The slug encodes model + version + dims so two identities cannot
+    collide in the same directory. A bare `<cache_dir>/<show_id>.json`
+    is the pre-Phase-2a layout and must NOT be written anymore.
+    """
+    p_input, p_cleaned, ei_dir, cl_dir = _patch_dirs(tmp_path)
+    cache_dir = tmp_path / "embeddings"
+    mock_backend = _mock_backend()
+
+    with p_input, p_cleaned, patch("src.pipelines.embed_episodes.LocalEmbeddingBackend", return_value=mock_backend):
+        _write_embedding_input(ei_dir, "ep-1", "show-A")
+        _write_cleaned_episode(cl_dir, "ep-1", "show-A")
+
+        run(cache_dir=cache_dir)
+
+    assert _versioned_cache_path(cache_dir, "show-A").exists()
+    # No flat cache file at <cache_dir>/show-A.json any more.
+    assert not (cache_dir / "show-A.json").exists()
+
+
+def test_cache_hit_uses_validate_cache_identity(tmp_path: Path) -> None:
+    """A pre-existing versioned cache whose 3 fields match is reused without re-embedding."""
+    p_input, p_cleaned, ei_dir, cl_dir = _patch_dirs(tmp_path)
+    cache_dir = tmp_path / "embeddings"
+    mock_backend = _mock_backend()
+
+    with p_input, p_cleaned, patch("src.pipelines.embed_episodes.LocalEmbeddingBackend", return_value=mock_backend):
+        _write_embedding_input(ei_dir, "ep-1", "show-A")
+        _write_cleaned_episode(cl_dir, "ep-1", "show-A")
+        # Versioned cache pre-written with matching identity (3 fields + vec len).
+        _write_cache(cache_dir, "show-A", ["ep-1"])
+
+        stats = run(cache_dir=cache_dir)
+
+    assert stats["written"] == 0
+    assert stats["skipped"] == 1
+    _assert_only_warmup_calls(mock_backend)
+
+
+def test_cache_hit_misses_when_dimensions_field_wrong(tmp_path: Path) -> None:
+    """validate_cache_identity checks dims too; mismatch triggers re-embed."""
+    p_input, p_cleaned, ei_dir, cl_dir = _patch_dirs(tmp_path)
+    cache_dir = tmp_path / "embeddings"
+    mock_backend = _mock_backend()
+
+    with p_input, p_cleaned, patch("src.pipelines.embed_episodes.LocalEmbeddingBackend", return_value=mock_backend):
+        _write_embedding_input(ei_dir, "ep-1", "show-A")
+        _write_cleaned_episode(cl_dir, "ep-1", "show-A")
+        # Wrong dims in metadata → validate_cache_identity flags DIMENSION_MISMATCH.
+        _write_cache(cache_dir, "show-A", ["ep-1"], embedding_dimensions=768)
+
+        stats = run(cache_dir=cache_dir)
+
+    assert stats["written"] == 1
+    assert stats["skipped"] == 0
