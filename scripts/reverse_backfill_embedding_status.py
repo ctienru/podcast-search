@@ -114,6 +114,22 @@ def _validate_fingerprint_shape(fp: dict[str, Any]) -> None:
                 raise SnapshotSchemaError(f"db_fingerprint.{side}.{key} missing")
 
 
+def _validate_rows_shape(rows: Any) -> None:
+    """Per-row schema guard so a malformed snapshot exits 3 instead of
+    crashing with KeyError inside `_reverse_rows`. Only `episode_id` is
+    mandatory — `pre_embedding_status` may legitimately be absent (it
+    then round-trips as NULL)."""
+    if not isinstance(rows, list):
+        raise SnapshotSchemaError(f"rows must be a list, got {type(rows).__name__}")
+    for idx, r in enumerate(rows):
+        if not isinstance(r, dict):
+            raise SnapshotSchemaError(
+                f"rows[{idx}] must be a dict, got {type(r).__name__}"
+            )
+        if "episode_id" not in r:
+            raise SnapshotSchemaError(f"rows[{idx}] missing episode_id")
+
+
 def _relative_db_path(db_path: Path) -> str:
     try:
         return str(db_path.resolve().relative_to(Path.cwd().resolve()))
@@ -177,8 +193,10 @@ def _verify_rows(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Return a list of mismatches: for each snapshot row, assert the
-    DB value equals `pre_embedding_status`. Rows not present in DB
-    count as a mismatch too (they should exist from the apply era)."""
+    DB value equals `pre_embedding_status`. Rows absent from the DB are
+    flagged with a dedicated `row_absent=True` field so operators can
+    tell "row vanished from DB" apart from "DB value is NULL" — both
+    would otherwise land as `actual: null` in the JSON report."""
     mismatches: list[dict[str, Any]] = []
     for r in rows:
         cursor = db.conn.execute(
@@ -186,13 +204,15 @@ def _verify_rows(
             (r["episode_id"],),
         )
         found = cursor.fetchone()
-        actual = found[0] if found else "__row_absent__"
+        row_absent = found is None
+        actual = None if row_absent else found[0]
         expected = r.get("pre_embedding_status")
-        if actual == "__row_absent__" or actual != expected:
+        if row_absent or actual != expected:
             mismatches.append({
                 "episode_id": r["episode_id"],
                 "expected": expected,
-                "actual": None if actual == "__row_absent__" else actual,
+                "actual": actual,
+                "row_absent": row_absent,
             })
     return mismatches
 
@@ -258,6 +278,13 @@ def main(argv: list[str] | None = None) -> int:
         _validate_fingerprint_shape(fp)
     except SnapshotSchemaError as exc:
         logger.error("snapshot_fingerprint_invalid",
+                     extra={"path": str(args.snapshot), "error": repr(exc)})
+        return 3
+
+    try:
+        _validate_rows_shape(data.get("rows"))
+    except SnapshotSchemaError as exc:
+        logger.error("snapshot_rows_invalid",
                      extra={"path": str(args.snapshot), "error": repr(exc)})
         return 3
 

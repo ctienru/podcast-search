@@ -135,12 +135,14 @@ class EpisodeStatusRepository:
     ) -> int:
         """Update embedding metadata without touching `embedding_status`.
 
-        Under Phase 2b-A V1e-A this primitive stays on the force_embed
-        and fallback-rebuild paths where `embedding_status` must remain
-        untouched. The daily pipeline CB1 commit uses
-        `mark_embedded_daily` instead, which additionally sets
-        `embedding_status='done'`. Do not migrate force_embed's writer
-        in Step 6 — that's Step 7's decision.
+        Under Phase 2b-A V1e-A this primitive is for callers that must
+        leave `embedding_status` untouched while still flushing fresh
+        embedding metadata. It is the writer behind fallback-rebuild
+        paths that have a metadata-only commit boundary and do not
+        participate in the artifact-ready semantics. Callers that
+        should additionally mark episodes as artifact-ready (`done`)
+        must use `mark_embedded_daily` — that is the shared writer
+        used by `embed_and_ingest` CB1 and `scripts/force_embed.py`.
 
         Use `mark_embedded_batch` for the legacy `embed_episodes` path,
         which still sets `embedding_status='done'` under the pre-Phase-2a

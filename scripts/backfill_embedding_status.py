@@ -28,6 +28,12 @@ Exit codes::
     3   Snapshot write failed (pre-UPDATE probe); DB untouched.
     4   Pre-condition failed (`episodes` table missing — Phase 2a
         migration has not run).
+    6   Snapshot finalisation failed after DB was mutated. DB is in
+        the new state but the on-disk snapshot still carries the
+        probe content (post_apply=null). The pre_apply fingerprint
+        is still trustworthy for a manual restore-from-backup, but
+        the automated `reverse_backfill_embedding_status.py` path
+        cannot accept this snapshot without operator intervention.
 
 Audit category taxonomy (per 2b-A impl doc §3.6):
 
@@ -54,6 +60,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -501,8 +508,10 @@ def _run_apply(
         return 2
 
     # Gate 2: anomaly_cache_missing_pct > threshold (§3.7).
-    anomaly_pct_pct = report["anomaly_cache_missing_pct"] * 100.0
-    if anomaly_pct_pct > args.anomaly_threshold_pct:
+    # `anomaly_cache_missing_pct` in the report is a fraction (0–1);
+    # `--anomaly-threshold-pct` is an argparse percentage (0–100).
+    anomaly_cache_missing_pct_points = report["anomaly_cache_missing_pct"] * 100.0
+    if anomaly_cache_missing_pct_points > args.anomaly_threshold_pct:
         logger.error(
             "apply_blocked_anomaly_threshold",
             extra={
@@ -554,9 +563,13 @@ def _run_apply(
         return 1
 
     # Post-UPDATE snapshot: rewrite with post_apply fingerprint and the
-    # filtered rows that actually wrote. If this second write fails the
-    # DB has already been mutated — log a warning but don't exit non-0;
-    # the pre_apply snapshot on disk still represents a recoverable state.
+    # filtered rows that actually wrote. Written atomically through a
+    # temp file + os.replace so a mid-write failure cannot leave the
+    # snapshot partially overwritten (the probe version stays on disk
+    # until the rename completes). If the rename itself fails, the DB
+    # is already mutated — exit 6 so operators know the automated
+    # reverse path requires manual repair (the pre_apply fingerprint
+    # remains trustworthy for restore-from-backup).
     post_fp = _compute_fingerprint(args.db_path)
     final_metadata = {
         "script_git_sha": probe_metadata["script_git_sha"],
@@ -569,18 +582,37 @@ def _run_apply(
         "changed_count": len(written),
         "skipped_concurrent_write_count": skipped_concurrent,
     }
+    tmp_snapshot_path = snapshot_path.with_suffix(snapshot_path.suffix + ".tmp")
     try:
         write_snapshot(
-            snapshot_path,
+            tmp_snapshot_path,
             snapshot_type=_SNAPSHOT_TYPE,
             rows=_snapshot_rows(written),
             metadata=final_metadata,
         )
+        os.replace(tmp_snapshot_path, snapshot_path)
     except (SnapshotError, OSError) as exc:
-        logger.warning(
+        # Clean up the tmp file if it was partially written; best-
+        # effort — we don't care if the unlink itself fails, the real
+        # signal is the exit 6 plus the stable probe snapshot.
+        try:
+            tmp_snapshot_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.error(
             "snapshot_final_write_failed",
-            extra={"error": repr(exc), "path": str(snapshot_path)},
+            extra={
+                "error": repr(exc),
+                "path": str(snapshot_path),
+                "db_state": "mutated",
+                "recoverable_via": "manual restore from pre_apply snapshot backup",
+            },
         )
+        report["apply_blocked_reason"] = "snapshot_final_write_failed"
+        report["snapshot_path"] = str(snapshot_path)
+        _print_report(report)
+        _write_json_report(args.json_report, report)
+        return 6
 
     unchanged = result.total_rows_scanned - len(decisions)
     report["changed_count"] = len(written)

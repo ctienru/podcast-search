@@ -13,9 +13,7 @@ fingerprint-match branch in isolation.
 
 from __future__ import annotations
 
-import hashlib
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -381,6 +379,94 @@ class TestIdempotency:
             ["ep:1"],
         ))
         assert row[0] == "noop-sentinel"  # no-op confirmed
+
+
+class TestSnapshotRowValidation:
+    """Step 8 copilot-review fix: a snapshot row missing `episode_id`
+    must cause exit 3 (schema invalid) rather than crashing with
+    KeyError inside `_reverse_rows`."""
+
+    def test_row_missing_episode_id_exits_3(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path, [
+            {"episode_id": "ep:1", "embedding_status": "done", "updated_at": ""},
+        ])
+        post_fp = _current_fp(db_path)
+        pre_fp = {"file_sha256": "0" * 64, "file_size_bytes": 0, "mtime": ""}
+        snap = tmp_path / "snap.json"
+        # Malformed: row dict is missing `episode_id`.
+        _write_snapshot(
+            snap,
+            rows=[{"show_id": "s", "pre_embedding_status": None}],
+            pre_apply_fp=pre_fp,
+            post_apply_fp=post_fp,
+        )
+        rc = rev.main(["--snapshot", str(snap), "--db-path", str(db_path), "--apply"])
+        assert rc == 3
+        # DB untouched.
+        db = Database(str(db_path))
+        row = next(db.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id='ep:1'"
+        ))
+        assert row[0] == "done"
+
+    def test_row_not_a_dict_exits_3(self, tmp_path: Path) -> None:
+        db_path = _make_db(tmp_path, [
+            {"episode_id": "ep:1", "embedding_status": "done", "updated_at": ""},
+        ])
+        post_fp = _current_fp(db_path)
+        pre_fp = {"file_sha256": "0" * 64, "file_size_bytes": 0, "mtime": ""}
+        snap = tmp_path / "snap.json"
+        _write_snapshot(
+            snap,
+            rows=["not_a_dict"],  # type: ignore[list-item]
+            pre_apply_fp=pre_fp,
+            post_apply_fp=post_fp,
+        )
+        rc = rev.main(["--snapshot", str(snap), "--db-path", str(db_path), "--apply"])
+        assert rc == 3
+
+
+class TestVerifyRowsRowAbsent:
+    """Step 8 copilot-review fix: `_verify_rows` distinguishes a row
+    absent from the DB from a row whose DB value is legitimately NULL.
+    Previously both wrote `actual: null` and were ambiguous."""
+
+    def test_mismatch_record_has_row_absent_boolean(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = _make_db(tmp_path, [
+            {"episode_id": "ep:here", "embedding_status": "done", "updated_at": ""},
+        ])
+        db = Database(str(db_path))
+        # Snapshot references a row that isn't in DB → should surface
+        # as row_absent=True in the mismatch list.
+        mismatches = rev._verify_rows(db, [
+            {"episode_id": "ep:gone", "show_id": "s", "pre_embedding_status": None},
+        ])
+        assert len(mismatches) == 1
+        entry = mismatches[0]
+        assert entry["episode_id"] == "ep:gone"
+        assert entry["row_absent"] is True
+        assert entry["actual"] is None
+
+    def test_null_status_with_expected_value_is_not_row_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """The row exists with a NULL status but the snapshot expected
+        'pending'. This is a real mismatch, not a missing row — the
+        distinction matters for operator triage."""
+        db_path = _make_db(tmp_path, [
+            {"episode_id": "ep:1", "embedding_status": None, "updated_at": ""},
+        ])
+        db = Database(str(db_path))
+        mismatches = rev._verify_rows(db, [
+            {"episode_id": "ep:1", "show_id": "s", "pre_embedding_status": "pending"},
+        ])
+        assert len(mismatches) == 1
+        entry = mismatches[0]
+        assert entry["row_absent"] is False
+        assert entry["actual"] is None
+        assert entry["expected"] == "pending"
 
 
 class TestJsonReport:

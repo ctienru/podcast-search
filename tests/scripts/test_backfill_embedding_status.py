@@ -453,6 +453,51 @@ class TestApplySnapshot:
         ))
         assert row[0] is None
 
+    def test_apply_final_snapshot_rewrite_failure_exits_6(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Step 8 copilot-review fix: if the post-UPDATE snapshot
+        rewrite fails, the DB has already been mutated. We must exit 6
+        (not 0 with a warning) and leave the probe snapshot — with
+        pre_apply fingerprint — in place so operators can restore from
+        backup manually."""
+        cache_dir = tmp_path / "cache"
+        db_path = tmp_path / "podcast.sqlite"
+        db = _make_db(tmp_path, [_pass_row("ep:ok:1", "show:ok")])
+        _write_cache_payload(cache_dir, "show:ok",
+                             episodes={"ep:ok:1": [0.1] * _DIMS})
+
+        # Let the first (probe) write succeed; fail the final rewrite.
+        real_write = script.write_snapshot
+        call_count = {"n": 0}
+
+        def _write_then_fail(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return real_write(*args, **kwargs)
+            raise OSError("disk went read-only mid-apply (simulated)")
+
+        monkeypatch.setattr(script, "write_snapshot", _write_then_fail)
+        rc, snap_dir = _run_cli_apply(tmp_path, db, cache_dir=cache_dir)
+        assert rc == 6
+
+        # DB IS mutated — we don't roll back past the apply.
+        after = Database(str(db_path))
+        row = next(after.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id=?",
+            ["ep:ok:1"],
+        ))
+        assert row[0] == "done"
+
+        # Probe snapshot (with post_apply=None) remains; tmp file cleaned up.
+        snapshots = list(snap_dir.glob("backfill-*.json"))
+        assert len(snapshots) == 1
+        data = json.loads(snapshots[0].read_text())
+        assert data["db_fingerprint"]["post_apply"] is None
+        assert data["db_fingerprint"]["pre_apply"] is not None
+        # No lingering .tmp file.
+        assert not list(snap_dir.glob("*.tmp"))
+
 
 class TestApplyGates:
     def test_hard_fail_blocks_apply(self, tmp_path: Path) -> None:

@@ -96,26 +96,23 @@ def normalize(
 
     if not dry_run and candidates:
         conn = db.conn
-        try:
-            with conn:
-                for episode_id, raw in candidates:
-                    clean_value = _clean(raw)
-                    if clean_value == raw:
-                        skipped_count += 1
-                        continue
-                    cur = conn.execute(
-                        "UPDATE episodes SET embedding_version = ?, updated_at = ? "
-                        "WHERE episode_id = ? AND embedding_version = ?",
-                        (clean_value, now, episode_id, raw),
-                    )
-                    if cur.rowcount == 1:
-                        updated_count += 1
-                    else:
-                        # Row value changed between SELECT and UPDATE; don't
-                        # touch it — operator can re-run for a fresh scan.
-                        skipped_count += 1
-        except Exception:
-            raise
+        with conn:
+            for episode_id, raw in candidates:
+                clean_value = _clean(raw)
+                if clean_value == raw:
+                    skipped_count += 1
+                    continue
+                cur = conn.execute(
+                    "UPDATE episodes SET embedding_version = ?, updated_at = ? "
+                    "WHERE episode_id = ? AND embedding_version = ?",
+                    (clean_value, now, episode_id, raw),
+                )
+                if cur.rowcount == 1:
+                    updated_count += 1
+                else:
+                    # Row value changed between SELECT and UPDATE; don't
+                    # touch it — operator can re-run for a fresh scan.
+                    skipped_count += 1
     else:
         for _, raw in candidates:
             if _clean(raw) == raw:
