@@ -77,6 +77,7 @@ from src.pipelines.show_rebuild import ShowRebuildResult, rebuild_show_cache
 from src.search.routing import IndexRoutingStrategy, LanguageSplitRoutingStrategy
 from src.services.es_service import ElasticsearchService
 from src.storage.base import StorageBase
+from src.storage.episode_status import EpisodeStatusRepository
 from src.storage.factory import create_storage
 from src.storage.sync_state import SyncStateRepository
 from src.types import IndexAlias, IngestCursor, IngestStats, Language
@@ -158,6 +159,7 @@ class EmbedAndIngestPipeline:
         cache_dir: Optional[Path] = None,
         strict_cache: bool = False,
         sync_repo: Optional[SyncStateRepository] = None,
+        episode_status_repo: Optional[EpisodeStatusRepository] = None,
         es_chunk_size: int = 500,
     ) -> None:
         self._environment = environment
@@ -175,6 +177,10 @@ class EmbedAndIngestPipeline:
         self._cache_dir = cache_dir or settings.EMBEDDING_CACHE_DIR
         self._strict_cache = strict_cache
         self._sync_repo = sync_repo
+        # Phase 2a CB1 per-show DB metadata commit lands here. When None, the
+        # commit step is skipped — pipelines running without DB access (e.g.
+        # some tests) simply omit the metadata write.
+        self._episode_status_repo = episode_status_repo
 
         # Caches
         self._show_cache: Dict[str, Dict] = {}
@@ -792,6 +798,15 @@ class EmbedAndIngestPipeline:
         errors: list = []
         successful_ids: list[str] = []
 
+        # Phase 2a §3.7: per-show bulk outcome tally. `show_bulk_ok` for a
+        # show is true iff every one of its actions came back ok AND at
+        # least one action was attempted. Used downstream for CB1 per-show
+        # DB metadata commit and OB1/OB2 processed/failed partitioning.
+        show_bulk_tally: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: {"ok": 0, "err": 0}
+        )
+        show_successful_ids: Dict[str, list[str]] = defaultdict(list)
+
         # §4.0 Error funneling: wrap bulk + transform to ensure A1 coverage.
         # streaming_bulk(client, self.build_actions(...), ...) — argument evaluation
         # happens inside the try, so transform-time errors (build_actions /
@@ -804,14 +819,25 @@ class EmbedAndIngestPipeline:
                     chunk_size=self._es_chunk_size,
                     raise_on_error=False,
                 ):
+                    op_type = next(iter(item))
+                    ep_id = item[op_type].get("_id")
+                    show_id = None
+                    if ep_id:
+                        ep_record = self._cleaned_episode_cache.get(ep_id)
+                        if ep_record:
+                            show_id = ep_record.get("show_id")
                     if ok:
                         success += 1
-                        op_type = next(iter(item))
-                        ep_id = item[op_type].get("_id")
                         if ep_id:
                             successful_ids.append(ep_id)
+                        if show_id:
+                            show_bulk_tally[show_id]["ok"] += 1
+                            if ep_id:
+                                show_successful_ids[show_id].append(ep_id)
                     else:
                         errors.append(item)
+                        if show_id:
+                            show_bulk_tally[show_id]["err"] += 1
                     pbar.update(1)
                     pbar.set_postfix(ok=success, err=len(errors))
         except Exception as exc:
@@ -853,6 +879,65 @@ class EmbedAndIngestPipeline:
                 errors.append({"type": "flush_exception", "error": repr(exc)})
                 logger.exception("flush_exception")
 
+        # Phase 2a §3.7 CB1: per-show DB metadata commit. Commit is triggered
+        # independently per show — a partial-failure run still commits the
+        # metadata of shows whose rebuild + bulk both succeeded, so that the
+        # next run's drift detector does not re-trigger rebuild for those
+        # shows. This is deliberately NOT gated by the run-level `errors`
+        # check (that gate belongs to sync_state; see Phase 1 R3).
+        committed_shows: list[str] = []
+        if self._episode_status_repo is not None:
+            for show_id, rebuild_result in self._rebuild_results.items():
+                if rebuild_result.status != "ok":
+                    continue
+                tally = show_bulk_tally.get(show_id, {"ok": 0, "err": 0})
+                show_bulk_ok = tally["err"] == 0 and tally["ok"] > 0
+                if not show_bulk_ok:
+                    continue
+                show_episode_ids = show_successful_ids.get(show_id, [])
+                if not show_episode_ids:
+                    continue
+                try:
+                    self._episode_status_repo.mark_embedding_metadata_only(
+                        episode_ids=show_episode_ids,
+                        model=rebuild_result.identity_used.model_name,
+                        version=rebuild_result.identity_used.embedding_version,
+                        embedded_at=rebuild_result.new_last_embedded_at.isoformat(),
+                    )
+                    committed_shows.append(show_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "cb1_metadata_commit_failed",
+                        extra={"show_id": show_id, "error": repr(exc)},
+                    )
+
+        # Phase 2a §3.7 OB1/OB2: partition candidate shows into processed /
+        # failed. A show is `processed` iff (cache hit OR rebuild ok) AND
+        # show_bulk_ok (every one of its bulk actions succeeded). Any other
+        # state counts as `failed` for this phase's strict OB1 definition.
+        candidate_shows: set[str] = (
+            set(self.allowed_show_ids)
+            if self.allowed_show_ids is not None
+            else set(show_bulk_tally.keys()) | set(self._rebuild_results.keys())
+        )
+        processed_count = 0
+        failed_count = 0
+        for sid in candidate_shows:
+            tally = show_bulk_tally.get(sid, {"ok": 0, "err": 0})
+            show_bulk_ok = tally["err"] == 0 and tally["ok"] > 0
+            rebuild_result = self._rebuild_results.get(sid)
+            had_cache_hit = (
+                rebuild_result is None and sid not in {
+                    f["show_id"] for f in self._rebuild_failures
+                }
+                and tally["ok"] + tally["err"] > 0
+            )
+            rebuild_ok = rebuild_result is not None and rebuild_result.status == "ok"
+            if show_bulk_ok and (rebuild_ok or had_cache_hit):
+                processed_count += 1
+            else:
+                failed_count += 1
+
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 
         stats = {
@@ -869,6 +954,13 @@ class EmbedAndIngestPipeline:
             "cache_identity_mismatch_count": self._cache_identity_mismatch_count,
             "fallback_rebuild_count": self._fallback_rebuild_count,
             "rebuild_failures": len(self._rebuild_failures),
+            # Phase 2a §3.7 OB1/OB2: per-show outcome partition. Invariant:
+            # processed + failed == len(candidate shows seen in this run).
+            "processed_shows": processed_count,
+            "failed_shows": failed_count,
+            # Phase 2a §3.7 CB1: shows that received a per-show metadata
+            # commit (rebuild ok + bulk ok). Cache-hit shows are NOT in here.
+            "committed_shows": len(committed_shows),
         }
         if self._cache_misses > 0:
             logger.warning(
