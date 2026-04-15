@@ -46,6 +46,9 @@ from tqdm import tqdm
 from src.config import settings
 from src.embedding.backend import LocalEmbeddingBackend
 from src.pipelines.embedding_catalog import MODEL_MAP
+from src.pipelines.embedding_identity import resolve_expected_identity
+from src.pipelines.embedding_runtime import embed_texts
+from src.pipelines.embedding_text import TextChunk, prepare_chunks_for_show
 from src.storage.episode_status import EpisodeStatusRepository
 from src.types import Language
 from src.utils.logging import setup_logging
@@ -231,10 +234,18 @@ def run(
     )
 
     # Warm up MPS JIT before the main loop so tqdm's time estimate is not
-    # thrown off by the first-call Metal compilation overhead.
+    # thrown off by the first-call Metal compilation overhead. Route through
+    # the runtime primitive so dimension self-validation fires on the first
+    # ever encoder output (fail loud before any cache is written).
     print("Warming up embedding model...", flush=True)
-    backend.embed_batch(["warmup"], "zh-tw")
-    backend.embed_batch(["warmup"], "en")
+    for warm_lang in ("zh-tw", "en"):
+        embed_texts(
+            texts=["warmup"],
+            language=warm_lang,
+            identity=resolve_expected_identity(language=warm_lang),
+            backend=backend,
+            batch_size=batch_size,
+        )
     print("  Ready.", flush=True)
 
     stats = {"written": 0, "skipped": 0, "failed": 0, "excluded": excluded, "total": total}
@@ -288,40 +299,54 @@ def run(
 
             stats["skipped"] += already_cached_count
 
-            # Group only the uncached inputs by language.
-            lang_groups: Dict[Language, list] = defaultdict(list)
+            # Phase 2a: produce chunks via the shared text primitive so that
+            # embed_episodes and show_rebuild cannot diverge on chunking.
+            show_identity = resolve_expected_identity(language=lang)
+            chunks = prepare_chunks_for_show(
+                show_id=show_id,
+                episode_inputs=inputs_to_embed,
+                identity=show_identity,
+            )
+
+            # Group chunks by language — language drives backend model
+            # selection at encode time and may differ from the show's
+            # default when cleaned_cache fallback resolves per episode.
+            chunks_by_lang: Dict[Language, list[TextChunk]] = defaultdict(list)
             missing_lang_count = 0
             if raw_show_target:
-                lang_groups[lang] = list(inputs_to_embed)
+                chunks_by_lang[lang] = list(chunks)
             else:
-                for inp in inputs_to_embed:
-                    ep_lang = _language_for_episode(inp.get("episode_id", ""), cleaned_cache)
+                for chunk in chunks:
+                    ep_lang = _language_for_episode(chunk.episode_id, cleaned_cache)
                     if ep_lang:
-                        lang_groups[ep_lang].append(inp)
+                        chunks_by_lang[ep_lang].append(chunk)
                     else:
                         missing_lang_count += 1
                         logger.debug(
                             "embed_episodes_episode_skipped_no_lang",
-                            extra={"episode_id": inp.get("episode_id")},
+                            extra={"episode_id": chunk.episode_id},
                         )
 
             if missing_lang_count:
                 stats["failed"] += missing_lang_count
 
             episodes_vectors: Dict[str, list] = {}
-            expected_vectors = sum(len(group) for group in lang_groups.values())
+            expected_vectors = sum(len(group) for group in chunks_by_lang.values())
 
-            for ep_lang, lang_inputs in lang_groups.items():
-                texts = [inp["embedding_input"]["text"] for inp in lang_inputs]
-                episode_ids = [inp["episode_id"] for inp in lang_inputs]
-
-                # Encode in batches.
-                for start in range(0, len(texts), batch_size):
-                    batch_texts = texts[start : start + batch_size]
-                    batch_ids = episode_ids[start : start + batch_size]
-                    vectors = backend.embed_batch(batch_texts, ep_lang)
-                    for ep_id, vec in zip(batch_ids, vectors):
-                        episodes_vectors[ep_id] = vec
+            # Runtime primitive performs WV1 dim self-validation; any violation
+            # raises EmbeddingDimensionContractViolation (systemic halt).
+            for ep_lang, lang_chunks in chunks_by_lang.items():
+                lang_identity = resolve_expected_identity(language=ep_lang)
+                texts = [chunk.text for chunk in lang_chunks]
+                vectors = embed_texts(
+                    texts=texts,
+                    language=ep_lang,
+                    identity=lang_identity,
+                    backend=backend,
+                    batch_size=batch_size,
+                )
+                for chunk, vec in zip(lang_chunks, vectors):
+                    episodes_vectors[chunk.episode_id] = vec
 
             if not episodes_vectors:
                 logger.warning("embed_episodes_no_vectors", extra={"show_id": show_id})
