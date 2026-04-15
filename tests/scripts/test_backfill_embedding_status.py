@@ -1,11 +1,9 @@
-"""Tests for `scripts/backfill_embedding_status.py` (Step 3 — dry-run
-classification against CT1–CT3).
+"""Tests for `scripts/backfill_embedding_status.py` (Step 3 + Step 4).
 
-One fixture per category from §3.6 covers the happy-path taxonomy;
-two additional tests cover the CLI surface (`--apply` rejected,
-`--help` mentions the apply-mode limitation) and one exercises the
-grouping/cache-reuse assumption by putting multiple rows in the same
-show.
+Step 3 covers CT1–CT3 classification (one fixture per §3.6 category).
+Step 4 adds CT4 (episode coverage), `--apply` mode with snapshot +
+db_fingerprint, per-class apply policy (hard-fail block, anomaly
+threshold), and the two-field concurrent-write guard (§3.2a).
 """
 
 from __future__ import annotations
@@ -19,6 +17,7 @@ from sqlite_utils import Database
 from scripts import backfill_embedding_status as script
 from src.pipelines.embedding_identity import EmbeddingIdentity, _DIM_TABLE
 from src.pipelines.embedding_paths import cache_path_for
+from src.storage import phase2b_snapshot
 
 
 _MODEL = next(iter(_DIM_TABLE))
@@ -259,33 +258,22 @@ class TestReportShape:
 
 
 class TestCliSurface:
-    def test_apply_flag_is_rejected(self, tmp_path: Path) -> None:
+    def test_dry_run_and_apply_are_mutually_exclusive(self, tmp_path: Path) -> None:
         db_path = tmp_path / "podcast.sqlite"
         Database(str(db_path))["episodes"].create(
             {"episode_id": str}, pk="episode_id"
         )
         with pytest.raises(SystemExit) as excinfo:
-            script.main(["--apply", "--db-path", str(db_path)])
-        # argparse exits with 2 on unrecognized arguments.
+            script.main(["--dry-run", "--apply", "--db-path", str(db_path)])
+        # argparse exits with 2 on mutex violation.
         assert excinfo.value.code == 2
 
-    def test_help_mentions_apply_unavailable(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        with pytest.raises(SystemExit):
-            script.main(["--help"])
-        captured = capsys.readouterr().out
-        # argparse may wrap the phrase across lines in the help block;
-        # collapse whitespace before checking to stay tolerant.
-        collapsed = " ".join(captured.split())
-        assert "apply mode unavailable" in collapsed
-
-    def test_main_exit_2_when_episodes_table_missing(self, tmp_path: Path) -> None:
+    def test_main_exit_4_when_episodes_table_missing(self, tmp_path: Path) -> None:
         db_path = tmp_path / "empty.sqlite"
         Database(str(db_path))  # empty DB
         rc = script.main(["--dry-run", "--db-path", str(db_path),
                           "--cache-dir", str(tmp_path / "cache")])
-        assert rc == 2
+        assert rc == 4
 
 
 class TestCacheReuse:
@@ -325,3 +313,367 @@ class TestLimit:
         )
         result = script.classify_all(db, cache_dir=tmp_path / "cache", limit=2)
         assert result.total_rows_scanned == 2
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — CT4 + apply + snapshot + concurrency guard
+# ---------------------------------------------------------------------------
+
+
+def _pass_row(episode_id: str, show_id: str, *, status: str | None = None) -> dict:
+    return {
+        "episode_id": episode_id,
+        "show_id": show_id,
+        "embedding_model": _MODEL,
+        "embedding_version": _VERSION,
+        "last_embedded_at": "2026-04-01T00:00:00Z",
+        "embedding_status": status,
+        "updated_at": "",
+    }
+
+
+def _run_cli_apply(
+    tmp_path: Path,
+    db: Database,
+    *,
+    cache_dir: Path,
+    threshold: float | None = None,
+    snapshot_dir: Path | None = None,
+) -> tuple[int, Path]:
+    snap_dir = snapshot_dir if snapshot_dir is not None else tmp_path / "snapshots"
+    argv = ["--apply",
+            "--db-path", str(db.conn.execute("PRAGMA database_list").fetchone()[2]),
+            "--cache-dir", str(cache_dir),
+            "--snapshot-dir", str(snap_dir)]
+    if threshold is not None:
+        argv.extend(["--anomaly-threshold-pct", str(threshold)])
+    # Close the test DB handle so main() can open it cleanly.
+    db.conn.close()
+    rc = script.main(argv)
+    return rc, snap_dir
+
+
+class TestCT4:
+    def test_fail_episode_entry_missing_fixture(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        db = _make_db(tmp_path, [_pass_row("ep:ct4:1", "show:ct4")])
+        # Payload is well-formed but the row's episode_id is not in the
+        # episodes dict — partial rebuild residue.
+        _write_cache_payload(cache_dir, "show:ct4",
+                             episodes={"ep:other:1": [0.0] * _DIMS})
+
+        result = script.classify_all(db, cache_dir=cache_dir)
+        assert result.counts[script.Category.FAIL_EPISODE_ENTRY_MISSING.value] == 1
+        assert (
+            script._CATEGORY_CLASS[script.Category.FAIL_EPISODE_ENTRY_MISSING]
+            is script.Klass.HARD_FAIL
+        )
+
+    def test_empty_episodes_dict_still_fails_ct4(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        db = _make_db(tmp_path, [_pass_row("ep:ct4:2", "show:ct4b")])
+        _write_cache_payload(cache_dir, "show:ct4b", episodes={})
+
+        result = script.classify_all(db, cache_dir=cache_dir)
+        assert result.counts[script.Category.FAIL_EPISODE_ENTRY_MISSING.value] == 1
+
+
+class TestApplySnapshot:
+    def test_apply_writes_snapshot_with_db_fingerprint_four_subfields(
+        self, tmp_path: Path
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        db = _make_db(tmp_path, [_pass_row("ep:ok:1", "show:ok")])
+        _write_cache_payload(cache_dir, "show:ok",
+                             episodes={"ep:ok:1": [0.1] * _DIMS})
+
+        rc, snap_dir = _run_cli_apply(tmp_path, db, cache_dir=cache_dir)
+        assert rc == 0
+
+        snapshots = list(snap_dir.glob("backfill-*.json"))
+        assert len(snapshots) == 1, snapshots
+        data = phase2b_snapshot.read_snapshot(snapshots[0])
+        phase2b_snapshot.validate_schema(data, expected_type="backfill_embedding_status")
+
+        fp = data["db_fingerprint"]
+        assert "path" in fp
+        assert "pre_apply" in fp and "post_apply" in fp
+        for side in ("pre_apply", "post_apply"):
+            for key in ("file_sha256", "file_size_bytes", "mtime"):
+                assert key in fp[side], f"missing {side}.{key}"
+        # pre and post differ because the UPDATE mutates the DB.
+        assert fp["pre_apply"]["file_sha256"] != fp["post_apply"]["file_sha256"]
+        # rows_to_change captures the one row that actually changed.
+        assert len(data["rows"]) == 1
+        assert data["rows"][0]["episode_id"] == "ep:ok:1"
+        assert data["rows"][0]["pre_embedding_status"] is None
+        # Script-level metadata surfaces in the final snapshot.
+        assert data["changed_count"] == 1
+        assert data["skipped_concurrent_write_count"] == 0
+
+    def test_apply_status_is_set_to_done_for_pass_row(
+        self, tmp_path: Path
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        db_path = tmp_path / "podcast.sqlite"
+        db = _make_db(tmp_path, [_pass_row("ep:ok:1", "show:ok")])
+        _write_cache_payload(cache_dir, "show:ok",
+                             episodes={"ep:ok:1": [0.1] * _DIMS})
+
+        rc, _ = _run_cli_apply(tmp_path, db, cache_dir=cache_dir)
+        assert rc == 0
+        # Re-open to observe post-apply state.
+        after = Database(str(db_path))
+        row = next(after.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id=?",
+            ["ep:ok:1"],
+        ))
+        assert row[0] == "done"
+
+    def test_apply_snapshot_write_failure_blocks_db_update(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        db_path = tmp_path / "podcast.sqlite"
+        db = _make_db(tmp_path, [_pass_row("ep:ok:1", "show:ok")])
+        _write_cache_payload(cache_dir, "show:ok",
+                             episodes={"ep:ok:1": [0.1] * _DIMS})
+
+        def _boom(*a, **kw):
+            raise OSError("disk full (simulated)")
+
+        monkeypatch.setattr(script, "write_snapshot", _boom)
+        rc, _ = _run_cli_apply(tmp_path, db, cache_dir=cache_dir)
+        assert rc == 3
+        # DB must be untouched.
+        after = Database(str(db_path))
+        row = next(after.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id=?",
+            ["ep:ok:1"],
+        ))
+        assert row[0] is None
+
+
+class TestApplyGates:
+    def test_hard_fail_blocks_apply(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        db_path = tmp_path / "podcast.sqlite"
+        db = _make_db(tmp_path, [_pass_row("ep:ct4:1", "show:ct4")])
+        _write_cache_payload(cache_dir, "show:ct4",
+                             episodes={"ep:other:1": [0.0] * _DIMS})
+
+        rc, snap_dir = _run_cli_apply(tmp_path, db, cache_dir=cache_dir)
+        assert rc == 2
+        # No snapshot written.
+        assert not any(snap_dir.glob("backfill-*.json")) if snap_dir.exists() else True
+        # DB row untouched.
+        after = Database(str(db_path))
+        row = next(after.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id=?",
+            ["ep:ct4:1"],
+        ))
+        assert row[0] is None
+
+    def test_anomaly_threshold_exceeded_blocks_apply(
+        self, tmp_path: Path
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        db_path = tmp_path / "podcast.sqlite"
+        # Only metadata-complete row is an anomaly (100% > default 10%).
+        db = _make_db(tmp_path, [
+            _pass_row("ep:anom:1", "show:anom", status="done"),
+        ])
+        # No cache written → ANOMALY_CACHE_MISSING.
+        rc, snap_dir = _run_cli_apply(tmp_path, db, cache_dir=cache_dir)
+        assert rc == 2
+        assert not any(snap_dir.glob("backfill-*.json")) if snap_dir.exists() else True
+        # DB row untouched (still 'done').
+        after = Database(str(db_path))
+        row = next(after.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id=?",
+            ["ep:anom:1"],
+        ))
+        assert row[0] == "done"
+
+    def test_anomaly_threshold_override_allows_apply(
+        self, tmp_path: Path
+    ) -> None:
+        """With a permissive threshold the same anomaly fixture must land
+        the anomaly row at 'pending' (downgrade-from-'done' is a feature
+        per §3.2a, not a bug)."""
+        cache_dir = tmp_path / "cache"
+        db_path = tmp_path / "podcast.sqlite"
+        db = _make_db(tmp_path, [
+            _pass_row("ep:anom:1", "show:anom", status="done"),
+        ])
+        rc, _ = _run_cli_apply(tmp_path, db, cache_dir=cache_dir, threshold=100.0)
+        assert rc == 0
+        after = Database(str(db_path))
+        row = next(after.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id=?",
+            ["ep:anom:1"],
+        ))
+        assert row[0] == "pending"
+
+    def test_threshold_flag_cannot_override_hard_fail(
+        self, tmp_path: Path
+    ) -> None:
+        """A permissive --anomaly-threshold-pct must still fail apply
+        when a hard_fail row exists. The flag controls the anomaly class
+        only; hard-fail is non-overridable."""
+        cache_dir = tmp_path / "cache"
+        db = _make_db(tmp_path, [_pass_row("ep:ct4:1", "show:ct4")])
+        _write_cache_payload(cache_dir, "show:ct4",
+                             episodes={"ep:other:1": [0.0] * _DIMS})
+        rc, _ = _run_cli_apply(tmp_path, db, cache_dir=cache_dir, threshold=100.0)
+        assert rc == 2
+
+
+class TestConcurrentWriteGuard:
+    """Exercise the two-field `WHERE ... IS ...` guard directly by
+    running classify → then mutating the DB row behind the result's
+    back → then calling `_apply_updates` with the stale read markers."""
+
+    def test_skips_row_when_last_embedded_at_changed(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        db_path = tmp_path / "podcast.sqlite"
+        db = _make_db(tmp_path, [_pass_row("ep:race:1", "show:race")])
+        _write_cache_payload(cache_dir, "show:race",
+                             episodes={"ep:race:1": [0.1] * _DIMS})
+
+        result = script.classify_all(db, cache_dir=cache_dir)
+        decisions = script._collect_apply_decisions(result)
+        assert len(decisions) == 1
+
+        # Simulate a concurrent `force_embed`: it re-embeds and bumps
+        # last_embedded_at. Our guard should prevent overwriting.
+        db.conn.execute(
+            "UPDATE episodes SET last_embedded_at=? WHERE episode_id=?",
+            ("2099-01-01T00:00:00Z", "ep:race:1"),
+        )
+        db.conn.commit()
+
+        written, skipped = script._apply_updates(db, decisions)
+        assert written == []
+        assert skipped == 1
+        # Row status remains whatever it was before (None).
+        row = next(db.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id=?",
+            ["ep:race:1"],
+        ))
+        assert row[0] is None
+
+    def test_skips_row_when_embedding_status_changed(self, tmp_path: Path) -> None:
+        """Guards the case where a concurrent writer flips the status
+        field without touching last_embedded_at — a single-field guard
+        on last_embedded_at would miss this, hence AND-of-both."""
+        cache_dir = tmp_path / "cache"
+        db = _make_db(tmp_path, [_pass_row("ep:race:2", "show:race2")])
+        _write_cache_payload(cache_dir, "show:race2",
+                             episodes={"ep:race:2": [0.1] * _DIMS})
+
+        result = script.classify_all(db, cache_dir=cache_dir)
+        decisions = script._collect_apply_decisions(result)
+        assert len(decisions) == 1
+
+        db.conn.execute(
+            "UPDATE episodes SET embedding_status=? WHERE episode_id=?",
+            ("pending", "ep:race:2"),
+        )
+        db.conn.commit()
+
+        written, skipped = script._apply_updates(db, decisions)
+        assert written == []
+        assert skipped == 1
+
+
+class TestIdempotencyAndTargetSkip:
+    def test_apply_twice_is_idempotent(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        db_path = tmp_path / "podcast.sqlite"
+        db = _make_db(tmp_path, [_pass_row("ep:ok:1", "show:ok")])
+        _write_cache_payload(cache_dir, "show:ok",
+                             episodes={"ep:ok:1": [0.1] * _DIMS})
+
+        rc1, _ = _run_cli_apply(tmp_path, db, cache_dir=cache_dir)
+        assert rc1 == 0
+        # Second apply: row is already 'done', so nothing to change.
+        second_db = Database(str(db_path))
+        rc2, snap_dir = _run_cli_apply(tmp_path, second_db,
+                                       cache_dir=cache_dir,
+                                       snapshot_dir=tmp_path / "snapshots2")
+        assert rc2 == 0
+        snapshots = list((tmp_path / "snapshots2").glob("backfill-*.json"))
+        assert len(snapshots) == 1
+        data = phase2b_snapshot.read_snapshot(snapshots[0])
+        assert data["rows"] == []
+        assert data["changed_count"] == 0
+
+    def test_row_already_at_target_is_not_in_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        # Mix: one row already 'done' and classified PASS (no-op) +
+        # one row 'pending' and classified PASS (must become 'done').
+        db = _make_db(
+            tmp_path,
+            [
+                _pass_row("ep:ok:already", "show:ok", status="done"),
+                _pass_row("ep:ok:new", "show:ok", status=None),
+            ],
+        )
+        _write_cache_payload(
+            cache_dir, "show:ok",
+            episodes={
+                "ep:ok:already": [0.1] * _DIMS,
+                "ep:ok:new": [0.2] * _DIMS,
+            },
+        )
+
+        rc, snap_dir = _run_cli_apply(tmp_path, db, cache_dir=cache_dir)
+        assert rc == 0
+        snapshots = list(snap_dir.glob("backfill-*.json"))
+        data = phase2b_snapshot.read_snapshot(snapshots[0])
+        ids = {r["episode_id"] for r in data["rows"]}
+        assert ids == {"ep:ok:new"}
+        assert data["changed_count"] == 1
+
+
+class TestJsonReportSchemaParity:
+    def test_dry_run_report_keys_subset_of_apply_report_keys(
+        self, tmp_path: Path
+    ) -> None:
+        """Dry-run and apply JSON reports share the audit-core schema
+        (apply extends with changed/skipped/snapshot fields). Consumers
+        can read every classification metric from either mode."""
+        cache_dir = tmp_path / "cache"
+        db = _make_db(tmp_path, [_pass_row("ep:ok:1", "show:ok")])
+        _write_cache_payload(cache_dir, "show:ok",
+                             episodes={"ep:ok:1": [0.1] * _DIMS})
+
+        dry_report = script.build_report(
+            script.classify_all(db, cache_dir=cache_dir),
+            mode="dry-run",
+        )
+        audit_core = {
+            "mode", "ran_at", "total_rows_scanned", "counts", "samples",
+            "anomalies", "metadata_complete_count",
+            "anomaly_cache_missing_count", "anomaly_cache_missing_pct",
+            "hard_fail_count",
+        }
+        assert audit_core.issubset(dry_report.keys())
+
+        # Build an apply-mode report the same way _run_apply does, then
+        # ensure the core keys are present and extend-only fields can be
+        # attached without collision.
+        apply_report = script.build_report(
+            script.classify_all(db, cache_dir=cache_dir),
+            mode="apply",
+        )
+        apply_report.update({
+            "changed_count": 0,
+            "unchanged_count": 1,
+            "skipped_concurrent_write_count": 0,
+            "snapshot_path": "x",
+        })
+        assert audit_core.issubset(apply_report.keys())

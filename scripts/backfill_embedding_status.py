@@ -1,50 +1,61 @@
-"""Backfill `episodes.embedding_status` from cache + DB truth (CT1–CT3).
+"""Backfill `episodes.embedding_status` from cache + DB truth (CT1–CT4).
 
-This is Step 3 of the 2b-A implementation: classify every `episodes`
-row against three of the four correctness contracts (CT1 row metadata
-complete, CT2 path + payload identity match, CT3 payload readable) and
-report the result. `--apply` is deliberately absent at this step; it is
-added in Step 4 alongside CT4 (episode-entry coverage), snapshot, and
-the per-class apply policy.
+Step 4 of the 2b-A implementation: classify every `episodes` row against
+the four correctness contracts and optionally apply the classification
+result back to the DB with snapshot-backed reversibility.
+
+Correctness contracts:
+
+- CT1: row metadata complete enough to form an `EmbeddingIdentity`
+- CT2: row identity == path identity == payload identity
+- CT3: cache payload JSON-readable
+- CT4: payload's `episodes` dict contains the row's `episode_id`
 
 CLI::
 
-    python -m scripts.backfill_embedding_status --dry-run
+    python -m scripts.backfill_embedding_status [--dry-run | --apply]
                                                  [--limit N]
+                                                 [--snapshot-dir PATH]
+                                                 [--anomaly-threshold-pct P]
                                                  [--json-report PATH]
 
-Exit codes at this step::
+Exit codes::
 
-    0   Dry-run completed, report written.
+    0   Completed (dry-run reported, or apply succeeded).
     1   DB-level error.
-    2   Pre-condition failed (`episodes` table missing — Phase 2a
+    2   Apply blocked: a hard-fail row exists OR
+        anomaly_cache_missing_pct exceeds threshold.
+    3   Snapshot write failed (pre-UPDATE probe); DB untouched.
+    4   Pre-condition failed (`episodes` table missing — Phase 2a
         migration has not run).
-    4   Step 0 blocking verification failed (kept for parity with the
-        Step 4 CLI surface; reserved, not used yet).
 
-The audit category taxonomy (per 2b-A impl doc §3.6) is machine-
-readable in the JSON report and grouped by `Class`:
+Audit category taxonomy (per 2b-A impl doc §3.6):
 
 - ``normal``: ``pass``, ``neutral_metadata_absent``
-- ``anomaly``: ``anomaly_cache_missing`` (DB metadata present but
-  versioned cache file absent — data inconsistency, not pre-embed)
+- ``anomaly``: ``anomaly_partial_metadata``, ``anomaly_cache_missing``
 - ``hard_fail``: ``fail_payload_unreadable``,
-  ``fail_payload_identity_mismatch`` (``fail_episode_entry_missing``
-  lands in Step 4 when CT4 is implemented)
+  ``fail_payload_identity_mismatch``, ``fail_episode_entry_missing``
 
-`anomaly_cache_missing_pct` is reported with the denominator
-``metadata_complete_count`` (rows passing CT1), per §3.7: using the
-universe of rows whose metadata *claims* they were embedded is the only
-denominator that reflects "of the rows that should have a cache, how
-many are missing one".
+`anomaly_cache_missing_pct` denominator = `metadata_complete_count`
+(rows passing CT1).
+
+Snapshot semantics (per §3.3):
+
+The ``--apply`` path writes a snapshot before touching the DB
+(``db_fingerprint.pre_apply``), then rewrites it post-UPDATE with
+``db_fingerprint.post_apply`` and the rows that actually wrote (rows
+skipped by the two-field concurrent-write guard are excluded). The
+reverse script uses pre/post fingerprints to decide legality.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sqlite3
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -63,12 +74,18 @@ from src.pipelines.embedding_identity_adapter import (
     identity_from_row,
 )
 from src.pipelines.embedding_paths import cache_path_for
+from src.storage.phase2b_snapshot import (
+    SnapshotError,
+    write_snapshot,
+)
 from src.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
 
 _SAMPLE_LIMIT = 10
+_SNAPSHOT_TYPE = "backfill_embedding_status"
+_DEFAULT_ANOMALY_THRESHOLD_PCT = 10.0
 
 
 class Category(str, Enum):
@@ -78,6 +95,7 @@ class Category(str, Enum):
     ANOMALY_CACHE_MISSING = "anomaly_cache_missing"
     FAIL_PAYLOAD_UNREADABLE = "fail_payload_unreadable"
     FAIL_PAYLOAD_IDENTITY_MISMATCH = "fail_payload_identity_mismatch"
+    FAIL_EPISODE_ENTRY_MISSING = "fail_episode_entry_missing"
 
 
 class Klass(str, Enum):
@@ -93,14 +111,24 @@ _CATEGORY_CLASS: dict[Category, Klass] = {
     Category.ANOMALY_CACHE_MISSING: Klass.ANOMALY,
     Category.FAIL_PAYLOAD_UNREADABLE: Klass.HARD_FAIL,
     Category.FAIL_PAYLOAD_IDENTITY_MISMATCH: Klass.HARD_FAIL,
+    Category.FAIL_EPISODE_ENTRY_MISSING: Klass.HARD_FAIL,
+}
+
+# Target `embedding_status` value derived purely from category. Hard-fail
+# categories are absent here because apply is blocked before reaching
+# any per-row decision when a hard-fail row exists.
+_CATEGORY_TARGET: dict[Category, str] = {
+    Category.PASS: "done",
+    Category.NEUTRAL_METADATA_ABSENT: "pending",
+    Category.ANOMALY_PARTIAL_METADATA: "pending",
+    Category.ANOMALY_CACHE_MISSING: "pending",
 }
 
 
 @dataclass
-class Classification:
+class ClassifiedRow:
+    row: dict[str, Any]
     category: Category
-    # The identity we succeeded in building from the row, when applicable.
-    row_identity: EmbeddingIdentity | None = None
 
 
 @dataclass
@@ -109,6 +137,11 @@ class ClassificationResult:
     samples: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     anomalies: list[dict[str, str]] = field(default_factory=list)
     total_rows_scanned: int = 0
+    # Per-row classification retained so `--apply` can iterate without
+    # re-running classify. The memory cost is one dict reference per row
+    # (row dicts are already held during classify), which is acceptable
+    # at the scale this script runs on.
+    rows: list[ClassifiedRow] = field(default_factory=list)
 
     def record(self, *, row: dict[str, Any], category: Category) -> None:
         self.counts[category.value] += 1
@@ -123,6 +156,7 @@ class ClassificationResult:
                     "reason": category.value,
                 }
             )
+        self.rows.append(ClassifiedRow(row=row, category=category))
 
 
 def _row_is_fully_blank(row: dict[str, Any]) -> bool:
@@ -138,7 +172,7 @@ def _classify_row(
     cache_dir: Path,
     cache_by_key: dict[tuple[str, EmbeddingIdentity], tuple[str, dict | None]],
 ) -> Category:
-    """Classify a single row against CT1–CT3.
+    """Classify a single row against CT1–CT4.
 
     `cache_by_key` caches the (status, payload) outcome per
     (show_id, identity) so the cache file and its parse are resolved
@@ -148,10 +182,6 @@ def _classify_row(
     try:
         row_identity = identity_from_row(row)
     except IdentityAdapterError:
-        # Fully blank → plain pre-embed neutral; a mix of present-and-
-        # absent lands here too. Partial metadata is rare in practice and
-        # treated the same way: write 'pending' and leave the row for a
-        # re-embed on the next run.
         if _row_is_fully_blank(row):
             return Category.NEUTRAL_METADATA_ABSENT
         return Category.ANOMALY_PARTIAL_METADATA
@@ -160,14 +190,21 @@ def _classify_row(
     if key not in cache_by_key:
         cache_by_key[key] = _resolve_cache(cache_dir, row_identity, row["show_id"])
 
-    status, _payload = cache_by_key[key]
+    status, payload = cache_by_key[key]
     if status == "not_found":
         return Category.ANOMALY_CACHE_MISSING
     if status == "unreadable":
         return Category.FAIL_PAYLOAD_UNREADABLE
     if status in ("payload_bad", "mismatch"):
         return Category.FAIL_PAYLOAD_IDENTITY_MISMATCH
-    # status == "ok" → CT1–CT3 all satisfied. CT4 is Step 4's job.
+
+    # CT3 passed; payload is usable. CT4: this row's episode_id must
+    # have an entry in the payload's `episodes` dict. A show cache that
+    # exists but is missing this row is a partial-rebuild residue.
+    episodes = (payload or {}).get("episodes")
+    if not isinstance(episodes, dict) or row["episode_id"] not in episodes:
+        return Category.FAIL_EPISODE_ENTRY_MISSING
+
     return Category.PASS
 
 
@@ -220,11 +257,14 @@ def classify_all(
 
 
 def _metadata_complete_count(counts: Counter) -> int:
-    """CT1 denominator: rows where metadata was complete enough to form
-    an identity (i.e. everything except neutral and partial metadata)."""
+    """CT1 denominator: rows whose metadata was complete enough to form
+    an identity (i.e. excluding neutral and partial-metadata rows)."""
     return sum(
-        v for k, v in counts.items() 
-        if k not in (Category.NEUTRAL_METADATA_ABSENT.value, Category.ANOMALY_PARTIAL_METADATA.value)
+        v for k, v in counts.items()
+        if k not in (
+            Category.NEUTRAL_METADATA_ABSENT.value,
+            Category.ANOMALY_PARTIAL_METADATA.value,
+        )
     )
 
 
@@ -236,7 +276,7 @@ def _hard_fail_count(counts: Counter) -> int:
 
 
 def build_report(result: ClassificationResult, *, mode: str) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = _utc_now_iso()
     counts = dict(result.counts)
     for cat in Category:
         counts.setdefault(cat.value, 0)  # always emit zero rather than omit
@@ -276,8 +316,13 @@ def _print_report(report: dict[str, Any]) -> None:
         Category.ANOMALY_CACHE_MISSING.value,
         Category.FAIL_PAYLOAD_UNREADABLE.value,
         Category.FAIL_PAYLOAD_IDENTITY_MISMATCH.value,
+        Category.FAIL_EPISODE_ENTRY_MISSING.value,
     ):
         print(f"    {k}: {report['counts'].get(k, 0)}")
+    if "changed_count" in report:
+        print(f"  changed_count: {report['changed_count']}")
+        print(f"  unchanged_count: {report['unchanged_count']}")
+        print(f"  skipped_concurrent_write_count: {report['skipped_concurrent_write_count']}")
     if report["anomalies"]:
         shown = min(len(report["anomalies"]), _SAMPLE_LIMIT)
         print(f"  anomalies (first {shown}):")
@@ -285,29 +330,315 @@ def _print_report(report: dict[str, Any]) -> None:
             print(f"    {entry}")
 
 
-_APPLY_UNAVAILABLE_HELP = (
-    "apply mode unavailable until episode coverage validation (CT4), "
-    "snapshot, and per-class apply policy are implemented in Step 4"
-)
+# ---------------------------------------------------------------------------
+# Apply-mode helpers
+# ---------------------------------------------------------------------------
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _compute_fingerprint(db_path: Path) -> dict[str, Any]:
+    """Return sha256 + size + mtime for the DB file. Used to anchor the
+    snapshot's pre_apply / post_apply lineage."""
+    h = hashlib.sha256()
+    with db_path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    stat = db_path.stat()
+    mtime_iso = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "file_sha256": h.hexdigest(),
+        "file_size_bytes": stat.st_size,
+        "mtime": mtime_iso,
+    }
+
+
+def _relative_db_path(db_path: Path) -> str:
+    """Best-effort relative path anchored at CWD; falls back to absolute
+    string. The reverse script treats `path` difference as a warning, so
+    exact canonicalisation isn't load-bearing."""
+    try:
+        return str(db_path.resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(db_path)
+
+
+def _git_sha_or_unknown() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if len(out) == 40:
+            return out
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+    return "unknown"
+
+
+def _default_snapshot_dir() -> Path:
+    """`podcast-search/data/phase2b-snapshots/`, computed relative to this
+    script rather than settings.DATA_DIR (which points to the crawler's
+    data dir, shared via symlinking but not semantically the right home
+    for search-local snapshots)."""
+    return Path(__file__).resolve().parents[1] / "data" / "phase2b-snapshots"
+
+
+@dataclass
+class ApplyDecision:
+    """One row's apply-time decision. Only rows where `target != current`
+    survive to this stage; hard-fail rows never reach here because apply
+    is gated out before we iterate."""
+    episode_id: str
+    show_id: str
+    pre_embedding_status: str | None
+    target_status: str
+    # Read-time markers for the two-field concurrent-write guard (§3.2a).
+    read_last_embedded_at: str | None
+    read_embedding_status: str | None
+
+
+def _collect_apply_decisions(
+    result: ClassificationResult,
+) -> list[ApplyDecision]:
+    decisions: list[ApplyDecision] = []
+    for cr in result.rows:
+        target = _CATEGORY_TARGET.get(cr.category)
+        if target is None:
+            continue  # hard-fail rows — apply would already be blocked
+        current = cr.row.get("embedding_status")
+        if current == target:
+            continue  # unchanged; reconciliation has nothing to do
+        decisions.append(
+            ApplyDecision(
+                episode_id=cr.row["episode_id"],
+                show_id=cr.row.get("show_id", ""),
+                pre_embedding_status=current,
+                target_status=target,
+                read_last_embedded_at=cr.row.get("last_embedded_at"),
+                read_embedding_status=current,
+            )
+        )
+    return decisions
+
+
+def _snapshot_rows(decisions: list[ApplyDecision]) -> list[dict[str, Any]]:
+    """Public snapshot shape (§3.3 rows_to_change)."""
+    return [
+        {
+            "episode_id": d.episode_id,
+            "show_id": d.show_id,
+            "pre_embedding_status": d.pre_embedding_status,
+        }
+        for d in decisions
+    ]
+
+
+def _apply_updates(
+    db: Database,
+    decisions: list[ApplyDecision],
+) -> tuple[list[ApplyDecision], int]:
+    """Execute per-row UPDATE with two-field concurrent-write guard.
+
+    Returns (actually_written_decisions, skipped_concurrent_count).
+    Uses `WHERE last_embedded_at IS :x AND embedding_status IS :y` so
+    that a concurrent writer who touches either field between our SELECT
+    and UPDATE lands us on `rowcount == 0` (skipped, not an error). `IS`
+    rather than `=` to let NULL markers compare equal.
+    """
+    now_iso = _utc_now_iso()
+    written: list[ApplyDecision] = []
+    skipped = 0
+    # Single transaction: any sqlite3 error inside rolls back the batch.
+    with db.conn:
+        for d in decisions:
+            cur = db.conn.execute(
+                "UPDATE episodes "
+                "SET embedding_status = :target, updated_at = :now "
+                "WHERE episode_id = :episode_id "
+                "  AND last_embedded_at IS :read_last "
+                "  AND embedding_status IS :read_status",
+                {
+                    "target": d.target_status,
+                    "now": now_iso,
+                    "episode_id": d.episode_id,
+                    "read_last": d.read_last_embedded_at,
+                    "read_status": d.read_embedding_status,
+                },
+            )
+            if cur.rowcount == 1:
+                written.append(d)
+            else:
+                skipped += 1
+    return written, skipped
+
+
+def _write_json_report(path: Path | None, report: dict[str, Any]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+
+def _run_apply(
+    db: Database,
+    *,
+    args: argparse.Namespace,
+) -> int:
+    result = classify_all(db, cache_dir=args.cache_dir, limit=args.limit)
+    report = build_report(result, mode="apply")
+
+    # Gate 1: any hard-fail row blocks apply (§3.7). Never overridable.
+    if report["hard_fail_count"] > 0:
+        logger.error(
+            "apply_blocked_hard_fail",
+            extra={"hard_fail_count": report["hard_fail_count"]},
+        )
+        report["apply_blocked_reason"] = "hard_fail"
+        _print_report(report)
+        _write_json_report(args.json_report, report)
+        return 2
+
+    # Gate 2: anomaly_cache_missing_pct > threshold (§3.7).
+    anomaly_pct_pct = report["anomaly_cache_missing_pct"] * 100.0
+    if anomaly_pct_pct > args.anomaly_threshold_pct:
+        logger.error(
+            "apply_blocked_anomaly_threshold",
+            extra={
+                "anomaly_cache_missing_pct": report["anomaly_cache_missing_pct"],
+                "threshold_pct": args.anomaly_threshold_pct,
+            },
+        )
+        report["apply_blocked_reason"] = "anomaly_threshold_exceeded"
+        _print_report(report)
+        _write_json_report(args.json_report, report)
+        return 2
+
+    # Decide which rows to touch.
+    decisions = _collect_apply_decisions(result)
+
+    # Pre-UPDATE snapshot probe: if we can't write a snapshot, we don't
+    # touch the DB. This is the failure mode that exit code 3 covers.
+    snapshot_path = args.snapshot_dir / f"backfill-{_utc_now_iso()}.json"
+    pre_fp = _compute_fingerprint(args.db_path)
+    probe_metadata = {
+        "script_git_sha": _git_sha_or_unknown(),
+        "db_fingerprint": {
+            "path": _relative_db_path(args.db_path),
+            "pre_apply": pre_fp,
+            "post_apply": None,
+        },
+        "total_rows_scanned": result.total_rows_scanned,
+    }
+    try:
+        write_snapshot(
+            snapshot_path,
+            snapshot_type=_SNAPSHOT_TYPE,
+            rows=_snapshot_rows(decisions),
+            metadata=probe_metadata,
+        )
+    except (SnapshotError, OSError) as exc:
+        logger.error("snapshot_probe_write_failed",
+                     extra={"error": repr(exc), "path": str(snapshot_path)})
+        report["apply_blocked_reason"] = "snapshot_write_failed"
+        _print_report(report)
+        _write_json_report(args.json_report, report)
+        return 3
+
+    # Execute UPDATEs with two-field guard.
+    try:
+        written, skipped_concurrent = _apply_updates(db, decisions)
+    except sqlite3.Error as exc:
+        logger.error("apply_db_error", extra={"error": repr(exc)})
+        return 1
+
+    # Post-UPDATE snapshot: rewrite with post_apply fingerprint and the
+    # filtered rows that actually wrote. If this second write fails the
+    # DB has already been mutated — log a warning but don't exit non-0;
+    # the pre_apply snapshot on disk still represents a recoverable state.
+    post_fp = _compute_fingerprint(args.db_path)
+    final_metadata = {
+        "script_git_sha": probe_metadata["script_git_sha"],
+        "db_fingerprint": {
+            "path": probe_metadata["db_fingerprint"]["path"],
+            "pre_apply": pre_fp,
+            "post_apply": post_fp,
+        },
+        "total_rows_scanned": result.total_rows_scanned,
+        "changed_count": len(written),
+        "skipped_concurrent_write_count": skipped_concurrent,
+    }
+    try:
+        write_snapshot(
+            snapshot_path,
+            snapshot_type=_SNAPSHOT_TYPE,
+            rows=_snapshot_rows(written),
+            metadata=final_metadata,
+        )
+    except (SnapshotError, OSError) as exc:
+        logger.warning(
+            "snapshot_final_write_failed",
+            extra={"error": repr(exc), "path": str(snapshot_path)},
+        )
+
+    unchanged = result.total_rows_scanned - len(decisions)
+    report["changed_count"] = len(written)
+    report["unchanged_count"] = unchanged
+    report["skipped_concurrent_write_count"] = skipped_concurrent
+    report["snapshot_path"] = str(snapshot_path)
+
+    _print_report(report)
+    _write_json_report(args.json_report, report)
+
+    logger.info(
+        "backfill_apply_complete",
+        extra={
+            "changed_count": len(written),
+            "unchanged_count": unchanged,
+            "skipped_concurrent_write_count": skipped_concurrent,
+            "snapshot_path": str(snapshot_path),
+        },
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Classify episodes.embedding_status against CT1–CT3 and report. "
-            f"{_APPLY_UNAVAILABLE_HELP}."
+            "Classify episodes.embedding_status against CT1–CT4 and either "
+            "report (--dry-run, default) or reconcile the DB (--apply). "
+            "Apply writes a snapshot before touching any row; use the "
+            "reverse script bound to that snapshot to roll back."
         ),
     )
-    # Only --dry-run at this step; --apply is intentionally not declared so
-    # argparse rejects it with "unrecognized argument".
-    parser.add_argument(
-        "--dry-run", action="store_true", default=True,
-        help="Report only; no DB writes (currently the only supported mode).",
-    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", dest="mode", action="store_const", const="dry-run",
+                      help="Classify and report; no DB writes (default).")
+    mode.add_argument("--apply", dest="mode", action="store_const", const="apply",
+                      help="Classify, write pre-apply snapshot, then reconcile DB.")
+    parser.set_defaults(mode="dry-run")
+
     parser.add_argument("--limit", type=int, default=None,
                         help="Cap the number of rows scanned.")
     parser.add_argument("--json-report", type=Path, default=None,
                         help="Write the JSON report to this path.")
+    parser.add_argument("--snapshot-dir", type=Path, default=_default_snapshot_dir(),
+                        help="Directory for the pre-apply snapshot (apply mode).")
+    parser.add_argument(
+        "--anomaly-threshold-pct", type=float,
+        default=_DEFAULT_ANOMALY_THRESHOLD_PCT,
+        help=(
+            "Block --apply when anomaly_cache_missing exceeds this percent "
+            "of metadata_complete_count (default 10.0). Only applies to "
+            "anomaly_cache_missing; hard-fail categories cannot be overridden."
+        ),
+    )
     parser.add_argument("--db-path", type=Path,
                         default=Path(settings.DATA_DIR) / "podcast.sqlite",
                         help="SQLite DB path.")
@@ -332,8 +663,12 @@ def main(argv: list[str] | None = None) -> int:
     if "episodes" not in db.table_names():
         logger.error("precondition_failed_episodes_table_missing",
                      extra={"path": str(args.db_path)})
-        return 2
+        return 4
 
+    if args.mode == "apply":
+        return _run_apply(db, args=args)
+
+    # Dry-run path.
     try:
         result = classify_all(db, cache_dir=args.cache_dir, limit=args.limit)
     except sqlite3.Error as exc:
@@ -341,11 +676,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     report = build_report(result, mode="dry-run")
-
     _print_report(report)
-    if args.json_report is not None:
-        args.json_report.parent.mkdir(parents=True, exist_ok=True)
-        args.json_report.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _write_json_report(args.json_report, report)
 
     logger.info(
         "backfill_classify_complete",
