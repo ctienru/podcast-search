@@ -68,17 +68,25 @@ class EpisodeStatusRepository:
         version: str,
         embedded_at: str,
     ) -> int:
-        """Daily-pipeline artifact-ready commit: write full embedding
-        metadata AND `embedding_status='done'`.
+        """Artifact-ready commit: write full embedding metadata AND
+        `embedding_status='done'`.
 
-        Phase 2b-A V1e-A contract: this is the single writer used by
-        `embed_and_ingest.py` at the CB1 per-show commit boundary, and
-        ONLY for shows whose rebuild succeeded AND whose bulk actions
-        all succeeded. Cache-hit-only shows (no rebuild in this run)
-        must NOT pass through this writer — they have no fresh
-        `embedded_at` timestamp and marking them 'done' here would
-        destroy lineage. Their status reconciliation is the backfill
-        script's job.
+        Phase 2b-A V1e-A sanctioned callers:
+          - `embed_and_ingest.py` CB1 per-show commit — only for shows
+            with rebuild_ok AND show_bulk_ok. Cache-hit-only shows
+            never pass through this writer (no fresh embedded_at; would
+            destroy lineage); their status reconciliation is the
+            backfill script's job.
+          - `scripts/force_embed.py` — operator override writes the
+            artifact-ready half of the two-commit-boundary design,
+            then advertises the canonical handoff command so the
+            local-synced half (owned by embed_and_ingest) can follow.
+
+        Do NOT use this for:
+          - Fallback / force_embed metadata-only paths where status
+            must stay untouched — use `mark_embedding_metadata_only`.
+          - Legacy standalone `embed_episodes.py` — keep using
+            `mark_embedded_batch`.
 
         Args:
             episode_ids: Episode IDs from the rebuild_ok + bulk_ok

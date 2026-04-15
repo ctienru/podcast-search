@@ -216,20 +216,20 @@ class TestFieldParity:
 
 
 class TestWiringAstAudit:
-    """Step 6 wiring contract: `embed_and_ingest.py` calls
-    `mark_embedded_daily` at CB1. `force_embed.py` and `embed_episodes.py`
-    keep their existing writers (Step 7 decides force_embed's
-    status-writer path; it's not in Step 6 scope)."""
+    """Phase 2b-A wiring contract after Step 7:
+    `mark_embedded_daily` is used by `embed_and_ingest.py` (Step 6)
+    AND `scripts/force_embed.py` (Step 7). `embed_episodes.py` keeps
+    `mark_embedded_batch` for the legacy standalone path."""
 
     def test_embed_and_ingest_calls_mark_embedded_daily(self) -> None:
         src = Path("src/pipelines/embed_and_ingest.py").read_text()
         assert "mark_embedded_daily" in src
         assert "mark_embedding_metadata_only" not in src
 
-    def test_force_embed_still_uses_metadata_only(self) -> None:
+    def test_force_embed_calls_mark_embedded_daily(self) -> None:
         src = Path("scripts/force_embed.py").read_text()
-        assert "mark_embedding_metadata_only" in src
-        assert "mark_embedded_daily" not in src
+        assert "mark_embedded_daily" in src
+        assert "mark_embedding_metadata_only" not in src
 
     def test_embed_episodes_still_uses_embedded_batch(self) -> None:
         src = Path("src/pipelines/embed_episodes.py").read_text()
