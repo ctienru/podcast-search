@@ -1033,6 +1033,7 @@ def run_incremental(
     cache_dir: Optional[Path] = None,
     strict_cache: bool = False,
     sync_repo: Optional[SyncStateRepository] = None,
+    episode_status_repo: Optional[EpisodeStatusRepository] = None,
     es_chunk_size: int = 500,
 ) -> dict:
     """Run ingest in incremental mode: only shows updated since the last run.
@@ -1098,6 +1099,7 @@ def run_incremental(
         cache_dir=cache_dir,
         strict_cache=strict_cache,
         sync_repo=sync_repo,
+        episode_status_repo=episode_status_repo,
         es_chunk_size=es_chunk_size,
     )
     stats = pipeline.run()
@@ -1126,6 +1128,7 @@ def run_backfill(
     batch_size: int = 64,
     dry_run: bool = False,
     sync_repo: Optional[SyncStateRepository] = None,
+    episode_status_repo: Optional[EpisodeStatusRepository] = None,
     es_chunk_size: int = 500,
 ) -> dict:
     """Re-ingest all shows regardless of cursor (force_full=True).
@@ -1156,6 +1159,7 @@ def run_backfill(
         batch_size=batch_size,
         dry_run=dry_run,
         sync_repo=sync_repo,
+        episode_status_repo=episode_status_repo,
         es_chunk_size=es_chunk_size,
     )
 
@@ -1168,6 +1172,7 @@ def upsert_by_show_id(
     batch_size: int = 64,
     dry_run: bool = False,
     sync_repo: Optional[SyncStateRepository] = None,
+    episode_status_repo: Optional[EpisodeStatusRepository] = None,
     es_chunk_size: int = 500,
 ) -> int:
     """Re-ingest all episodes for a single show.
@@ -1210,6 +1215,7 @@ def upsert_by_show_id(
         batch_size=batch_size,
         dry_run=dry_run,
         sync_repo=sync_repo,
+        episode_status_repo=episode_status_repo,
         es_chunk_size=es_chunk_size,
     )
     stats = pipeline.run()
@@ -1291,7 +1297,15 @@ def run() -> None:
     # --from-cache: skip embedding entirely; vectors come from disk cache.
     backend: Optional[EmbeddingBackend] = None if args.from_cache else LocalEmbeddingBackend()
 
-    _sync_repo = SyncStateRepository(Database(settings.SQLITE_PATH))
+    # Share one Database handle across both repos so commits land on the
+    # same connection and transaction semantics match Phase 1's writeback.
+    _db = Database(settings.SQLITE_PATH)
+    _sync_repo = SyncStateRepository(_db)
+    # Phase 2a CB1: per-show DB metadata commit repo. Wired at the CLI
+    # entry point so every production mode (single / backfill / incremental)
+    # picks it up. Without this, the pipeline's per-show commit path is
+    # silently skipped because the repo stays None.
+    _episode_status_repo = EpisodeStatusRepository(_db)
 
     if mode == "single":
         if not args.show_id:
@@ -1302,6 +1316,7 @@ def run() -> None:
             batch_size=args.batch_size,
             dry_run=args.dry_run,
             sync_repo=_sync_repo,
+            episode_status_repo=_episode_status_repo,
             es_chunk_size=args.es_chunk_size,
         )
         logger.info("upsert_complete", extra={"show_id": args.show_id, "episodes": count})
@@ -1312,6 +1327,7 @@ def run() -> None:
             batch_size=args.batch_size,
             dry_run=args.dry_run,
             sync_repo=_sync_repo,
+            episode_status_repo=_episode_status_repo,
             es_chunk_size=args.es_chunk_size,
         )
     else:
@@ -1328,6 +1344,7 @@ def run() -> None:
             from_cache=args.from_cache,
             strict_cache=args.strict_cache,
             sync_repo=_sync_repo,
+            episode_status_repo=_episode_status_repo,
             es_chunk_size=args.es_chunk_size,
         )
         if stats and stats.get("errors", 0) > 0:
