@@ -44,7 +44,8 @@ from sqlite_utils import Database
 from tqdm import tqdm
 
 from src.config import settings
-from src.embedding.backend import LocalEmbeddingBackend, MODEL_MAP
+from src.embedding.backend import LocalEmbeddingBackend
+from src.pipelines.embedding_catalog import MODEL_MAP
 from src.storage.episode_status import EpisodeStatusRepository
 from src.types import Language
 from src.utils.logging import setup_logging
