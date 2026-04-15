@@ -58,7 +58,6 @@ Preserve semantics on ET1 (matches §4.4):
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from dataclasses import dataclass, field

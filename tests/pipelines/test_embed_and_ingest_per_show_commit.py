@@ -183,6 +183,7 @@ class TestCB2:
         # three-prohibitions contract (no cache rewrite, no DB write, no
         # encoder call).
         pipeline._cache_hit_count = 1
+        pipeline._cache_hit_show_ids.add("show:1")
 
         items = [_index_ok("ep:001")]
         with patch("src.pipelines.embed_and_ingest.streaming_bulk", side_effect=_fake_bulk(items)):
@@ -231,6 +232,7 @@ class TestOB1OB2:
         _add_episode(pipeline, "ep:mx:bad", "mixed:1")
 
         pipeline._cache_hit_count = 1  # hit:1 counted as cache hit
+        pipeline._cache_hit_show_ids.add("hit:1")
         pipeline._rebuild_results["rebuild:1"] = _ok_rebuild("rebuild:1")
         pipeline._rebuild_results["mixed:1"] = _ok_rebuild("mixed:1")
 

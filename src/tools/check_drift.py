@@ -38,14 +38,13 @@ import json
 import logging
 import sys
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from sqlite_utils import Database
 
 from src.config import settings
-from src.pipelines.embedding_catalog import MODEL_MAP
 from src.pipelines.embedding_identity import EmbeddingIdentity, resolve_expected_identity
 from src.pipelines.embedding_paths import DriftKind
 from src.types import Language

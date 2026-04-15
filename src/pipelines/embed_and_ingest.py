@@ -67,7 +67,6 @@ from tqdm import tqdm
 from src.config import settings
 from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
 from src.pipelines.embedding_identity import (
-    EmbeddingDimensionContractViolation,
     EmbeddingIdentity,
     resolve_expected_identity,
 )
@@ -206,6 +205,10 @@ class EmbedAndIngestPipeline:
         self._cache_miss_count: int = 0
         self._cache_identity_mismatch_count: int = 0
         self._fallback_rebuild_count: int = 0
+        # Explicit cache-hit tracking so the OB1/OB2 partition does not have
+        # to infer "cache hit" from the absence of a rebuild record (which
+        # would misclassify BM25-only shows that skipped rebuild).
+        self._cache_hit_show_ids: set[str] = set()
         # Per-show rebuild outcomes — kept for the upcoming per-show DB
         # metadata commit (populated but not yet consumed in this batch).
         self._rebuild_results: Dict[str, ShowRebuildResult] = {}
@@ -342,6 +345,7 @@ class EmbedAndIngestPipeline:
                         # Cache hit — three prohibitions: no cache rewrite, no
                         # DB metadata update, no runtime call. Just read.
                         self._cache_hit_count += 1
+                        self._cache_hit_show_ids.add(show_id)
                         for episode_id, vector in (entry.get("episodes") or {}).items():
                             self._vector_cache[episode_id] = vector
                             loaded_episodes += 1
@@ -926,12 +930,7 @@ class EmbedAndIngestPipeline:
             tally = show_bulk_tally.get(sid, {"ok": 0, "err": 0})
             show_bulk_ok = tally["err"] == 0 and tally["ok"] > 0
             rebuild_result = self._rebuild_results.get(sid)
-            had_cache_hit = (
-                rebuild_result is None and sid not in {
-                    f["show_id"] for f in self._rebuild_failures
-                }
-                and tally["ok"] + tally["err"] > 0
-            )
+            had_cache_hit = sid in self._cache_hit_show_ids
             rebuild_ok = rebuild_result is not None and rebuild_result.status == "ok"
             if show_bulk_ok and (rebuild_ok or had_cache_hit):
                 processed_count += 1
