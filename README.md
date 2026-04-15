@@ -262,11 +262,68 @@ SYNC_MODE=full python -m src.pipelines.embed_and_ingest
 
 ### Re-ingest a single show
 
-Use to fix a specific show without touching anything else.
+Use to fix a specific show without touching anything else. This is also the **canonical handoff command** that `force_embed` advises operators to run after a manual rebuild (see the next section).
 
 ```bash
 python -m src.pipelines.embed_and_ingest --show-id show:apple:12345678
 ```
+
+### Phase 2b-A: artifact-ready vs local-synced semantics
+
+Since Phase 2b-A, embedding state lives on two independent commit boundaries:
+
+- **artifact-ready** — `episodes.embedding_status='done'` means the embedding vector was produced and DB metadata committed. The cache file on disk exists and matches the current model/version identity.
+- **local-synced** — `search_sync_state(environment='local', sync_status='synced')` means the local Elasticsearch index has ingested the document.
+
+The two are **not required to be atomically synchronised**. Operators running `force_embed` can legitimately leave a row in the `artifact-ready AND NOT local-synced` state until the daily pipeline (or an explicit `--show-id` run) completes the ingest half. Any query that needs both must join both tables.
+
+#### `force_embed` advisory output
+
+On a clean exit (`exit 0` and not `--dry-run`), `force_embed` writes a machine-readable advisory to **stderr** (stdout stays reserved for the human-readable summary). The advisory is wrapped by marker lines so shell pipelines and operator tooling can both parse it:
+
+```
+=== PHASE2B_ADVISORY_BEGIN ===
+{
+  "schema_version": 1,
+  "state": "artifact_only",
+  "affected_show_ids": ["show:apple:1001073519", "..."],
+  "canonical_handoff_command_template": "python -m src.pipelines.embed_and_ingest --show-id <show_id>",
+  "next_step_commands": [
+    "python -m src.pipelines.embed_and_ingest --show-id show:apple:1001073519"
+  ]
+}
+=== PHASE2B_ADVISORY_END ===
+```
+
+- The advisory is **only** emitted on successful runs. Non-zero exits (partial failure, systemic halt, dry-run) suppress it so operators have to diagnose the failure before being handed off.
+- The `canonical_handoff_command_template` is the single source of truth; `next_step_commands` is its per-show expansion (`template.replace("<show_id>", sid)`).
+- Consumers must parse the stderr marker block — stdout is **not** the advisory surface even when it happens to contain a similar string.
+- Schema changes follow a version-bumped contract: backward-compatible additions keep `schema_version: 1`; removals / renames / tightened value ranges bump the major version and parsers must fail fast on unknown versions.
+
+#### Reconciliation and reversible backfill
+
+Phase 2b-A ships two reconciliation tools for the `embedding_status` column. Both keep the column as the artifact-ready truth source and are safe to re-run.
+
+```bash
+# Dry-run: classify every episodes row against CT1–CT4 and print an audit report.
+python -m scripts.backfill_embedding_status --dry-run --json-report /tmp/audit.json
+
+# Apply: writes 'done' / 'pending' per row, refuses to run if any hard-fail row
+# exists or anomaly_cache_missing_pct exceeds the threshold. Writes a reversible
+# snapshot before touching the DB.
+python -m scripts.backfill_embedding_status --apply --snapshot-dir podcast-search/data/phase2b-snapshots/
+
+# Reverse a previous apply using the snapshot artifact.
+python -m scripts.reverse_backfill_embedding_status \
+    --snapshot podcast-search/data/phase2b-snapshots/backfill-<timestamp>.json --apply
+```
+
+Key points:
+
+- **Hard-fail categories are never overridable.** If `fail_payload_unreadable`, `fail_payload_identity_mismatch`, or `fail_episode_entry_missing` is present, the operator must fix the cache or payload at the system level. No CLI flag loosens this.
+- **Anomaly threshold** (`--anomaly-threshold-pct`, default 10) only gates the `anomaly_cache_missing` class (DB metadata claims embedded but cache file missing). Downgrading a row from `done` to `pending` when its cache disappeared is a feature — it reflects true artifact state.
+- **Snapshots embed a db_fingerprint** (sha256 + size for both pre-apply and post-apply). Reverse refuses to run against a DB whose fingerprint matches neither side unless `--allow-fingerprint-drift` is supplied with a reason via the `PHASE2B_REVERSE_DRIFT_REASON` env var.
+- **Idempotency.** Re-running `--apply` on a converged DB produces `changed_count=0` and an empty snapshot `rows_to_change`.
 
 ### Re-index with new embedding model (alias switch pattern)
 

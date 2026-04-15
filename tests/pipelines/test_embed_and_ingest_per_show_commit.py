@@ -5,8 +5,10 @@ Batch 6 wired in per-show bulk tallying, DB metadata commit, and
 OB1/OB2 counters:
 
 - CB1: a show with rebuild_ok AND show_bulk_ok commits its metadata
-  through `mark_embedding_metadata_only` (never `mark_embedded_batch`,
-  since Phase 2a cannot spread `embedding_status='done'`).
+  through `mark_embedded_daily` (the Phase 2b-A V1e-A daily-path
+  artifact-ready writer). `mark_embedded_batch` remains for legacy
+  standalone `embed_episodes`; `mark_embedding_metadata_only` stays
+  on force_embed / fallback-rebuild paths.
 - CB2: cache-hit shows, rebuild-failed shows, and shows with any
   per-doc bulk error do NOT receive a metadata commit.
 - show_bulk_ok hard rule: a single per-doc error for a show makes
@@ -127,11 +129,12 @@ class TestCB1:
         with patch("src.pipelines.embed_and_ingest.streaming_bulk", side_effect=_fake_bulk(items)):
             stats = pipeline.run()
 
-        # CB1 uses mark_embedding_metadata_only, NOT mark_embedded_batch,
-        # so embedding_status='done' is not spread prematurely.
-        assert repo.mark_embedding_metadata_only.call_count == 1
+        # CB1 now uses mark_embedded_daily per V1e-A: writes
+        # embedding_status='done' together with the embedding metadata.
+        # Legacy mark_embedded_batch and metadata-only are both quiet.
+        assert repo.mark_embedded_daily.call_count == 1
         assert repo.mark_embedded_batch.call_count == 0
-        call = repo.mark_embedding_metadata_only.call_args
+        call = repo.mark_embedded_daily.call_args
         assert sorted(call.kwargs["episode_ids"]) == ["ep:001", "ep:002"]
         assert call.kwargs["model"] == _identity().model_name
         assert call.kwargs["version"] == _identity().embedding_version
@@ -153,7 +156,7 @@ class TestCB2:
         with patch("src.pipelines.embed_and_ingest.streaming_bulk", side_effect=_fake_bulk(mixed)):
             stats = pipeline.run()
 
-        assert repo.mark_embedding_metadata_only.call_count == 0
+        assert repo.mark_embedded_daily.call_count == 0
         assert stats["committed_shows"] == 0
 
     def test_rebuild_failed_show_is_not_committed(self, tmp_path):
@@ -172,7 +175,7 @@ class TestCB2:
         with patch("src.pipelines.embed_and_ingest.streaming_bulk", side_effect=_fake_bulk(items)):
             pipeline.run()
 
-        assert repo.mark_embedding_metadata_only.call_count == 0
+        assert repo.mark_embedded_daily.call_count == 0
 
     def test_cache_hit_show_is_not_committed(self, tmp_path):
         repo = MagicMock(spec=EpisodeStatusRepository)
@@ -189,7 +192,7 @@ class TestCB2:
         with patch("src.pipelines.embed_and_ingest.streaming_bulk", side_effect=_fake_bulk(items)):
             pipeline.run()
 
-        assert repo.mark_embedding_metadata_only.call_count == 0
+        assert repo.mark_embedded_daily.call_count == 0
 
 
 # ── show_bulk_ok hard rule ─────────────────────────────────────────────────
@@ -213,7 +216,7 @@ class TestShowBulkOk:
         with patch("src.pipelines.embed_and_ingest.streaming_bulk", side_effect=_fake_bulk(items)):
             stats = pipeline.run()
 
-        assert repo.mark_embedding_metadata_only.call_count == 0
+        assert repo.mark_embedded_daily.call_count == 0
         assert stats["committed_shows"] == 0
 
 

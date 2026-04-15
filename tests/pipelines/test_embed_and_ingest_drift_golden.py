@@ -228,9 +228,9 @@ class TestMismatchFallbackEndToEnd:
 
         # Per-show commit ran with the expected identity — not the stale
         # `text-v0` that was on disk.
-        assert repo.mark_embedding_metadata_only.call_count == 1
+        assert repo.mark_embedded_daily.call_count == 1
         assert repo.mark_embedded_batch.call_count == 0
-        commit = repo.mark_embedding_metadata_only.call_args
+        commit = repo.mark_embedded_daily.call_args
         assert commit.kwargs["model"] == EXPECTED_IDENTITY.model_name
         assert commit.kwargs["version"] == EXPECTED_IDENTITY.embedding_version
         assert commit.kwargs["version"] != "text-v0"
@@ -306,8 +306,8 @@ class TestMixedCacheStatesPerShowCommit:
         assert not any("text for ep:b1" in t for t in all_texts)
 
         # Exactly one DB commit — for the rebuilt show only.
-        assert repo.mark_embedding_metadata_only.call_count == 1
-        commit = repo.mark_embedding_metadata_only.call_args
+        assert repo.mark_embedded_daily.call_count == 1
+        commit = repo.mark_embedded_daily.call_args
         assert sorted(commit.kwargs["episode_ids"]) == ["ep:d1"]
         assert stats["committed_shows"] == 1
 

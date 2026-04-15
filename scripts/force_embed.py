@@ -20,12 +20,20 @@ What this tool does:
     There is no bulk ingest stage in this tool, so the primitive's ok
     is the whole commit signal.
 
+What this tool writes (Phase 2b-A V1e-A):
+  - `embedding_status='done'` at the artifact-ready commit boundary.
+    This is the sanctioned decoupling from local-synced: the row is
+    ready, but no ES ingest has happened yet. Operator must follow
+    up with `embed_and_ingest --show-id <show_id>` to close the
+    artifact-ready → local-synced bridge. The tool emits a machine-
+    readable advisory on stderr after a successful run naming the
+    exact handoff command for every show it rebuilt.
+
 What this tool never does:
-  - Never writes `embedding_status='done'`. Phase 2a keeps that field
-    decoupled from actual ES state until the semantic cleanup decision
-    is made, and this tool must not spread the stale semantics.
   - Never writes `search_sync_state` and never calls ES bulk. Those
-    are owned by the daily pipeline.
+    are owned by the daily pipeline. `embedding_status='done'` AND
+    the absence of a local-synced row is the legitimate artifact-
+    only state that the advisory points out to the operator.
   - Never re-imports `embed_episodes` — the primitive chain already
     owns chunking and runtime, and reaching into the batch entry point
     would fork the text / runtime behavior.
@@ -58,11 +66,12 @@ Preserve semantics on ET1 (matches §4.4):
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 from sqlite_utils import Database
 
@@ -100,6 +109,17 @@ EXIT_PER_SHOW_FAILURE = 4
 EXIT_SYSTEMIC_HALT = 5
 
 
+# Advisory surface (Phase 2b-A §3.5). Marker block wraps a JSON blob on
+# stderr so operator tools and shell pipelines can both parse and read.
+# Any change to these constants is a schema-version bump.
+_ADVISORY_BEGIN = "=== PHASE2B_ADVISORY_BEGIN ==="
+_ADVISORY_END = "=== PHASE2B_ADVISORY_END ==="
+_ADVISORY_SCHEMA_VERSION = 1
+_CANONICAL_HANDOFF_TEMPLATE = (
+    "python -m src.pipelines.embed_and_ingest --show-id <show_id>"
+)
+
+
 # ── Data shapes ─────────────────────────────────────────────────────────────
 
 
@@ -126,6 +146,9 @@ class ForceEmbedSummary:
     rebuild_failed: list[tuple[str, str]] = field(default_factory=list)
     rebuild_systemic_halted: bool = False
     db_metadata_updated: int = 0
+    # Shows that completed the artifact-ready commit (status='done' +
+    # metadata written). Advisory output on stderr cites this list.
+    committed_show_ids: list[str] = field(default_factory=list)
     exit_code: int = EXIT_OK
 
     def format(self) -> str:
@@ -279,14 +302,16 @@ def _commit_show_metadata(
 
     force_embed's commit trigger is deliberately lighter than
     `embed_and_ingest`'s: there is no bulk ingest stage, so the
-    primitive's `status == "ok"` is enough. Returns the number of DB
-    rows updated; the caller folds it into `db_metadata_updated`.
+    primitive's `status == "ok"` is enough. Under V1e-A this writes
+    `embedding_status='done'` alongside the embedding metadata,
+    through the shared artifact-ready writer. Returns the number of
+    DB rows updated; the caller folds it into `db_metadata_updated`.
     """
     episode_ids = _episode_ids_for_show(db, show_id)
     if not episode_ids:
         return 0
     assert result.new_last_embedded_at is not None  # status == "ok" invariant
-    return episode_status_repo.mark_embedding_metadata_only(
+    return episode_status_repo.mark_embedded_daily(
         episode_ids=episode_ids,
         model=result.identity_used.model_name,
         version=result.identity_used.embedding_version,
@@ -368,10 +393,58 @@ def run_force_embed(
             result=result,
         )
         summary.db_metadata_updated += updated
+        if updated > 0:
+            summary.committed_show_ids.append(resolved.show_id)
 
     if summary.rebuild_failed:
         summary.exit_code = EXIT_PER_SHOW_FAILURE
     return summary
+
+
+# ── Advisory emission ───────────────────────────────────────────────────────
+
+
+def _build_advisory(committed_show_ids: list[str]) -> dict:
+    """Assemble the Phase 2b-A §3.5 advisory payload.
+
+    `next_step_commands` is the template expanded for each show — a
+    convenience for copy/paste, not a second source of truth. Tests
+    assert the equality
+    ``next_step_commands[i] == template.replace("<show_id>", ids[i])``
+    so the two fields stay aligned by construction.
+    """
+    return {
+        "schema_version": _ADVISORY_SCHEMA_VERSION,
+        "state": "artifact_only",
+        "affected_show_ids": list(committed_show_ids),
+        "canonical_handoff_command_template": _CANONICAL_HANDOFF_TEMPLATE,
+        "next_step_commands": [
+            _CANONICAL_HANDOFF_TEMPLATE.replace("<show_id>", sid)
+            for sid in committed_show_ids
+        ],
+    }
+
+
+def _emit_advisory(summary: ForceEmbedSummary, stream: IO[str] | None = None) -> None:
+    """Write the advisory marker block to stderr (canonical surface).
+
+    stdout is intentionally left alone — operator tooling that
+    captures stdout for the human-readable summary must be able to
+    parse stderr separately. See impl doc §3.5 for the contract.
+
+    `stream` defaults to `None` so we resolve `sys.stderr` at call
+    time rather than at function-definition time; otherwise tests
+    (and any runtime replacing `sys.stderr`) can't intercept.
+
+    No-op if there is nothing to hand off (e.g. dry-run, or an all-
+    unresolvable run that somehow reached this branch).
+    """
+    if not summary.committed_show_ids:
+        return
+    out = stream if stream is not None else sys.stderr
+    print(_ADVISORY_BEGIN, file=out)
+    print(json.dumps(_build_advisory(summary.committed_show_ids)), file=out)
+    print(_ADVISORY_END, file=out)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -484,6 +557,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     summary.unresolvable_episode_ids = unresolvable
 
     print(summary.format())
+    # Advisory fires only on clean exit with real artifact commits.
+    # Non-zero exits drop the advisory because operator must diagnose
+    # the failure first; dry-run skips because no artifact was written.
+    if summary.exit_code == EXIT_OK and not args.dry_run:
+        _emit_advisory(summary)
     return summary.exit_code
 
 

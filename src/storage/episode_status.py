@@ -61,6 +61,71 @@ class EpisodeStatusRepository:
         self._db.conn.commit()
         return total
 
+    def mark_embedded_daily(
+        self,
+        episode_ids: list[str],
+        model: str,
+        version: str,
+        embedded_at: str,
+    ) -> int:
+        """Artifact-ready commit: write full embedding metadata AND
+        `embedding_status='done'`.
+
+        Phase 2b-A V1e-A sanctioned callers:
+          - `embed_and_ingest.py` CB1 per-show commit — only for shows
+            with rebuild_ok AND show_bulk_ok. Cache-hit-only shows
+            never pass through this writer (no fresh embedded_at; would
+            destroy lineage); their status reconciliation is the
+            backfill script's job.
+          - `scripts/force_embed.py` — operator override writes the
+            artifact-ready half of the two-commit-boundary design,
+            then advertises the canonical handoff command so the
+            local-synced half (owned by embed_and_ingest) can follow.
+
+        Do NOT use this for:
+          - Fallback / force_embed metadata-only paths where status
+            must stay untouched — use `mark_embedding_metadata_only`.
+          - Legacy standalone `embed_episodes.py` — keep using
+            `mark_embedded_batch`.
+
+        Args:
+            episode_ids: Episode IDs from the rebuild_ok + bulk_ok
+                         shows.
+            model:       Embedding model name from
+                         `rebuild_result.identity_used.model_name`.
+            version:     Embedding version from
+                         `rebuild_result.identity_used.embedding_version`
+                         (identity's canonical form, not legacy
+                         `<model>/text-v1`).
+            embedded_at: UTC ISO timestamp from
+                         `rebuild_result.new_last_embedded_at` — the
+                         actual moment the vector was produced.
+
+        Returns:
+            Number of rows updated across all chunks.
+        """
+        if not episode_ids:
+            return 0
+        MAX_CHUNK = 900
+        total = 0
+        now = _utc_now_iso()
+        for i in range(0, len(episode_ids), MAX_CHUNK):
+            chunk = episode_ids[i : i + MAX_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            result = self._db.execute(
+                f"""UPDATE episodes SET
+                      embedding_status  = 'done',
+                      embedding_model   = ?,
+                      embedding_version = ?,
+                      last_embedded_at  = ?,
+                      updated_at        = ?
+                    WHERE episode_id IN ({placeholders})""",
+                [model, version, embedded_at, now] + list(chunk),
+            )
+            total += result.rowcount
+        self._db.conn.commit()
+        return total
+
     def mark_embedding_metadata_only(
         self,
         episode_ids: list[str],
@@ -70,14 +135,14 @@ class EpisodeStatusRepository:
     ) -> int:
         """Update embedding metadata without touching `embedding_status`.
 
-        This is the Phase 2a per-show commit path: after a fallback rebuild
-        produced a fresh cache and the corresponding ES bulk actions for
-        that show all succeeded, we record which model and version just
-        wrote those vectors — but we deliberately do NOT set
-        `embedding_status='done'` because that field's semantics are
-        decoupled from ES state until Phase 2b performs the cleanup.
-        Writing 'done' in Phase 2a would spread the stale semantics
-        instead of waiting for the truth-source decision.
+        Under Phase 2b-A V1e-A this primitive is for callers that must
+        leave `embedding_status` untouched while still flushing fresh
+        embedding metadata. It is the writer behind fallback-rebuild
+        paths that have a metadata-only commit boundary and do not
+        participate in the artifact-ready semantics. Callers that
+        should additionally mark episodes as artifact-ready (`done`)
+        must use `mark_embedded_daily` — that is the shared writer
+        used by `embed_and_ingest` CB1 and `scripts/force_embed.py`.
 
         Use `mark_embedded_batch` for the legacy `embed_episodes` path,
         which still sets `embedding_status='done'` under the pre-Phase-2a

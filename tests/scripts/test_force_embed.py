@@ -6,9 +6,12 @@ Covers:
 - Per-show orchestration: happy path, dry-run, per-show recoverable
   failure (ET2), systemic halt (ET1) with preserve semantics for
   already-committed shows.
-- Commit policy: the tool invokes `mark_embedding_metadata_only`
-  (never `mark_embedded_batch`, which would set
-  `embedding_status='done'`).
+- Commit policy: the tool invokes `mark_embedded_daily` (shared
+  with `embed_and_ingest` CB1), which writes
+  `embedding_status='done'` at the artifact-ready boundary.
+  `mark_embedded_batch` stays on the legacy standalone path;
+  `mark_embedding_metadata_only` stays for any future path that
+  keeps status untouched.
 - Exit codes: 0 / 1 / 3 / 4 / 5. Exit code 2 (missing
   `--allow-model-drift`) is enforced by argparse, covered by a
   SystemExit test.
@@ -219,7 +222,7 @@ class TestRunForceEmbed:
         _add_episode(db, "ep:2", "show:1")
         return db
 
-    def test_happy_path_commits_metadata_only(self, tmp_path: Path) -> None:
+    def test_happy_path_commits_artifact_ready_metadata(self, tmp_path: Path) -> None:
         db = self._prep_db(tmp_path)
         resolved = [ResolvedShow(show_id="show:1", language="zh-tw")]
 
@@ -247,8 +250,8 @@ class TestRunForceEmbed:
         ).fetchone()
         assert row[0] == MODEL
         assert row[1] == "text-v1"
-        # Phase 2a: force_embed must NOT set embedding_status='done'.
-        assert row[2] is None
+        # Phase 2b-A V1e-A: force_embed writes artifact-ready status.
+        assert row[2] == "done"
         assert row[3] == "2026-04-15T12:00:00+00:00"
 
     def test_dry_run_skips_primitive_and_db(self, tmp_path: Path) -> None:
@@ -385,15 +388,16 @@ class TestRunForceEmbed:
         ).fetchone()
         assert row_3[0] is None
 
-    def test_commit_uses_metadata_only_not_mark_embedded_batch(self, tmp_path: Path) -> None:
-        """Phase 2a keeps `embedding_status` decoupled — force_embed
-        must go through `mark_embedding_metadata_only`, never
-        `mark_embedded_batch`."""
+    def test_commit_uses_mark_embedded_daily_not_legacy_writers(self, tmp_path: Path) -> None:
+        """V1e-A: force_embed's artifact-ready commit must route through
+        the shared `mark_embedded_daily` writer, not the legacy
+        `mark_embedded_batch` (embed_episodes only) nor
+        `mark_embedding_metadata_only` (status-untouched path)."""
         db = self._prep_db(tmp_path)
         resolved = [ResolvedShow(show_id="show:1", language="zh-tw")]
 
         fake_repo = MagicMock()
-        fake_repo.mark_embedding_metadata_only.return_value = 2
+        fake_repo.mark_embedded_daily.return_value = 2
 
         with patch(
             "scripts.force_embed.rebuild_show_cache",
@@ -410,9 +414,10 @@ class TestRunForceEmbed:
                 dry_run=False,
             )
 
-        assert fake_repo.mark_embedding_metadata_only.call_count == 1
+        assert fake_repo.mark_embedded_daily.call_count == 1
         assert fake_repo.mark_embedded_batch.call_count == 0
-        kwargs = fake_repo.mark_embedding_metadata_only.call_args.kwargs
+        assert fake_repo.mark_embedding_metadata_only.call_count == 0
+        kwargs = fake_repo.mark_embedded_daily.call_args.kwargs
         assert sorted(kwargs["episode_ids"]) == ["ep:1", "ep:2"]
         assert kwargs["model"] == MODEL
         assert kwargs["version"] == "text-v1"  # cleaned form only
@@ -547,4 +552,209 @@ class TestV18:
         disallowed = [h for h in hits if h not in allowed]
         assert disallowed == [], (
             f"--allow-model-drift appeared in unexpected paths: {disallowed}"
+        )
+
+
+# ── Step 7: advisory output + embedding_status='done' ───────────────────────
+
+
+def _parse_advisory_block(stderr_text: str) -> dict | None:
+    """Extract the JSON between the PHASE2B_ADVISORY marker lines, if any."""
+    begin = force_embed._ADVISORY_BEGIN
+    end = force_embed._ADVISORY_END
+    if begin not in stderr_text or end not in stderr_text:
+        return None
+    start = stderr_text.index(begin) + len(begin)
+    stop = stderr_text.index(end)
+    import json as _json
+    return _json.loads(stderr_text[start:stop].strip())
+
+
+def _capture_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> tuple[str, str, int]:
+    """Run `main(argv)` with sys.stdout / sys.stderr monkey-patched to
+    StringIO buffers so advisory tests don't fight with pytest's own
+    capture mechanism (which interacts badly with `setup_logging`'s
+    handler reseating). Returns (stdout_text, stderr_text, exit_code)."""
+    import io as _io
+    out_buf = _io.StringIO()
+    err_buf = _io.StringIO()
+    monkeypatch.setattr("sys.stdout", out_buf)
+    monkeypatch.setattr("sys.stderr", err_buf)
+    rc = main(argv)
+    return out_buf.getvalue(), err_buf.getvalue(), rc
+
+
+class TestAdvisoryEmission:
+    def _setup_two_shows(self, tmp_path: Path) -> Path:
+        db_path = tmp_path / "crawler.db"
+        db = _make_db(db_path.parent)
+        _add_show(db, "show:1")
+        _add_show(db, "show:2")
+        _add_episode(db, "ep:1", "show:1")
+        _add_episode(db, "ep:2", "show:2")
+        return db_path
+
+    def test_advisory_emitted_on_successful_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db_path = self._setup_two_shows(tmp_path)
+        with patch(
+            "scripts.force_embed.rebuild_show_cache",
+            side_effect=lambda show_id, **_: _ok_result(show_id),
+        ):
+            _, err, rc = _capture_main(monkeypatch, [
+                "--allow-model-drift", "--db", str(db_path),
+                "--show-ids", "show:1,show:2",
+                "--cache-dir", str(tmp_path / "cache"),
+            ])
+        assert rc == EXIT_OK
+        advisory = _parse_advisory_block(err)
+        assert advisory is not None, (
+            "advisory marker block must appear on stderr"
+        )
+        assert sorted(advisory["affected_show_ids"]) == ["show:1", "show:2"]
+
+    def test_advisory_suppressed_on_dry_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db_path = self._setup_two_shows(tmp_path)
+        _, err, rc = _capture_main(monkeypatch, [
+            "--allow-model-drift", "--db", str(db_path),
+            "--show-ids", "show:1",
+            "--dry-run",
+            "--cache-dir", str(tmp_path / "cache"),
+        ])
+        assert rc == EXIT_OK
+        assert force_embed._ADVISORY_BEGIN not in err
+
+    def test_advisory_suppressed_on_per_show_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exit 4 (partial success) must NOT emit advisory — operator has
+        to diagnose failures before being handed off."""
+        db_path = self._setup_two_shows(tmp_path)
+        with patch(
+            "scripts.force_embed.rebuild_show_cache",
+            side_effect=lambda show_id, **_: _failed_result(show_id),
+        ):
+            _, err, rc = _capture_main(monkeypatch, [
+                "--allow-model-drift", "--db", str(db_path),
+                "--show-ids", "show:1",
+                "--cache-dir", str(tmp_path / "cache"),
+            ])
+        assert rc == EXIT_PER_SHOW_FAILURE
+        assert force_embed._ADVISORY_BEGIN not in err
+
+    def test_advisory_suppressed_on_systemic_halt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db_path = self._setup_two_shows(tmp_path)
+
+        def _raise(show_id, **_):
+            raise EmbeddingDimensionContractViolation(
+                model_name=MODEL, expected=384, actual=100,
+            )
+
+        with patch("scripts.force_embed.rebuild_show_cache", side_effect=_raise):
+            _, err, rc = _capture_main(monkeypatch, [
+                "--allow-model-drift", "--db", str(db_path),
+                "--show-ids", "show:1",
+                "--cache-dir", str(tmp_path / "cache"),
+            ])
+        assert rc == EXIT_SYSTEMIC_HALT
+        assert force_embed._ADVISORY_BEGIN not in err
+
+    def test_advisory_not_emitted_on_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """stdout is reserved for the human-readable summary; advisory
+        must live ONLY on stderr so shell pipelines and operator
+        tooling can parse without stderr->stdout redirection."""
+        db_path = self._setup_two_shows(tmp_path)
+        with patch(
+            "scripts.force_embed.rebuild_show_cache",
+            side_effect=lambda show_id, **_: _ok_result(show_id),
+        ):
+            out, _, _ = _capture_main(monkeypatch, [
+                "--allow-model-drift", "--db", str(db_path),
+                "--show-ids", "show:1",
+                "--cache-dir", str(tmp_path / "cache"),
+            ])
+        assert force_embed._ADVISORY_BEGIN not in out
+        assert force_embed._ADVISORY_END not in out
+
+
+class TestAdvisorySchema:
+    def test_advisory_payload_schema_fields(self) -> None:
+        """Direct unit-level check of `_build_advisory` — schema shape."""
+        payload = force_embed._build_advisory(["show:a", "show:b"])
+        assert payload["schema_version"] == 1
+        assert payload["state"] == "artifact_only"
+        assert payload["affected_show_ids"] == ["show:a", "show:b"]
+        assert isinstance(payload["canonical_handoff_command_template"], str)
+        assert isinstance(payload["next_step_commands"], list)
+
+    def test_canonical_handoff_command_template_exact_string(self) -> None:
+        """Template is part of the CLI contract. Any rename of
+        embed_and_ingest invocation here breaks Phase 2b-A §3.5 and
+        must go through a schema_version bump."""
+        payload = force_embed._build_advisory(["show:x"])
+        assert (
+            payload["canonical_handoff_command_template"]
+            == "python -m src.pipelines.embed_and_ingest --show-id <show_id>"
+        )
+
+    def test_next_step_commands_expand_from_template(self) -> None:
+        ids = ["show:a", "show:b:weird/slash"]
+        payload = force_embed._build_advisory(ids)
+        template = payload["canonical_handoff_command_template"]
+        for i, sid in enumerate(ids):
+            assert payload["next_step_commands"][i] == template.replace(
+                "<show_id>", sid,
+            )
+
+    def test_next_step_commands_length_matches_affected(self) -> None:
+        payload = force_embed._build_advisory(["s:1", "s:2", "s:3"])
+        assert len(payload["next_step_commands"]) == len(
+            payload["affected_show_ids"],
+        )
+
+
+class TestStatusDoneOnSuccess:
+    def test_force_embed_sets_embedding_status_done(
+        self, tmp_path: Path
+    ) -> None:
+        """V1e-A CL4: after a successful force_embed, the row's
+        `embedding_status` must read 'done'."""
+        db_path = tmp_path / "crawler.db"
+        db = _make_db(db_path.parent)
+        _add_show(db, "show:1")
+        _add_episode(db, "ep:1", "show:1")
+
+        with patch(
+            "scripts.force_embed.rebuild_show_cache",
+            return_value=_ok_result("show:1"),
+        ):
+            rc = main([
+                "--allow-model-drift", "--db", str(db_path),
+                "--show-ids", "show:1",
+                "--cache-dir", str(tmp_path / "cache"),
+            ])
+        assert rc == EXIT_OK
+        row = db.execute(
+            "SELECT embedding_status FROM episodes WHERE episode_id='ep:1'"
+        ).fetchone()
+        assert row[0] == "done"
+
+
+class TestAdvisorySurfaceUniqueness:
+    """Only one template string may exist in force_embed.py. If
+    someone accidentally paste a second variant of the handoff command,
+    advisory consumers wouldn't know which is canonical."""
+
+    def test_force_embed_contains_exactly_one_handoff_template(self) -> None:
+        source = Path("scripts/force_embed.py").read_text()
+        template = "python -m src.pipelines.embed_and_ingest --show-id <show_id>"
+        assert source.count(template) == 1, (
+            "canonical handoff template string must appear exactly once"
         )
