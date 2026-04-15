@@ -19,11 +19,10 @@ from __future__ import annotations
 import ast
 import inspect
 
-from src.pipelines import embed_episodes
+from src.pipelines import embed_episodes, show_rebuild
 
 # Modules whose embed-producing behavior must go through shared primitives.
-# Add `show_rebuild` here once that module exists.
-PIPELINES = [embed_episodes]
+PIPELINES = [embed_episodes, show_rebuild]
 
 
 def _parse(module) -> ast.Module:
