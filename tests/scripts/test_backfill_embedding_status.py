@@ -115,6 +115,24 @@ class TestCategoryFixtures:
         # Neutral rows must not contribute to the anomaly/hard-fail counts.
         assert result.counts.get(script.Category.ANOMALY_CACHE_MISSING.value, 0) == 0
 
+    def test_anomaly_partial_metadata_fixture(self, tmp_path: Path) -> None:
+        db = _make_db(
+            tmp_path,
+            [{
+                "episode_id": "ep:partial:1",
+                "show_id": "show:partial",
+                "embedding_model": _MODEL,
+                "embedding_version": None,  # One missing field causes partial anomaly
+                "last_embedded_at": None,
+                "embedding_status": None,
+                "updated_at": "",
+            }],
+        )
+        result = script.classify_all(db, cache_dir=tmp_path / "cache")
+        assert result.counts[script.Category.ANOMALY_PARTIAL_METADATA.value] == 1
+        assert len(result.anomalies) == 1
+        assert result.anomalies[0]["episode_id"] == "ep:partial:1"
+
     def test_anomaly_cache_missing_fixture(self, tmp_path: Path) -> None:
         # DB metadata complete but no cache file under versioned path.
         db = _make_db(
@@ -203,6 +221,28 @@ class TestReportShape:
                 # neutral — must not contribute to denominator
                 {"episode_id": "ep:n:1", "show_id": "show:n",
                  "embedding_model": None, "embedding_version": None,
+                 "last_embedded_at": None, "embedding_status": None, "updated_at": ""},
+                # anomaly (denominator includes this, numerator == 1)
+                {"episode_id": "ep:a:1", "show_id": "show:a",
+                 "embedding_model": _MODEL, "embedding_version": _VERSION,
+                 "last_embedded_at": "2026-04-01T00:00:00Z",
+                 "embedding_status": "done", "updated_at": ""},
+            ],
+        )
+        result = script.classify_all(db, cache_dir=cache_dir)
+        report = script.build_report(result, mode="dry-run")
+        assert report["metadata_complete_count"] == 1
+        assert report["anomaly_cache_missing_count"] == 1
+        assert report["anomaly_cache_missing_pct"] == 1.0
+
+    def test_denominator_excludes_partial_metadata(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        db = _make_db(
+            tmp_path,
+            [
+                # partial — must not contribute to denominator
+                {"episode_id": "ep:p:1", "show_id": "show:p",
+                 "embedding_model": _MODEL, "embedding_version": None,
                  "last_embedded_at": None, "embedding_status": None, "updated_at": ""},
                 # anomaly (denominator includes this, numerator == 1)
                 {"episode_id": "ep:a:1", "show_id": "show:a",

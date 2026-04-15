@@ -97,26 +97,24 @@ def normalize(
     if not dry_run and candidates:
         conn = db.conn
         try:
-            conn.execute("BEGIN")
-            for episode_id, raw in candidates:
-                clean_value = _clean(raw)
-                if clean_value == raw:
-                    skipped_count += 1
-                    continue
-                cur = conn.execute(
-                    "UPDATE episodes SET embedding_version = ?, updated_at = ? "
-                    "WHERE episode_id = ? AND embedding_version = ?",
-                    (clean_value, now, episode_id, raw),
-                )
-                if cur.rowcount == 1:
-                    updated_count += 1
-                else:
-                    # Row value changed between SELECT and UPDATE; don't
-                    # touch it — operator can re-run for a fresh scan.
-                    skipped_count += 1
-            conn.commit()
+            with conn:
+                for episode_id, raw in candidates:
+                    clean_value = _clean(raw)
+                    if clean_value == raw:
+                        skipped_count += 1
+                        continue
+                    cur = conn.execute(
+                        "UPDATE episodes SET embedding_version = ?, updated_at = ? "
+                        "WHERE episode_id = ? AND embedding_version = ?",
+                        (clean_value, now, episode_id, raw),
+                    )
+                    if cur.rowcount == 1:
+                        updated_count += 1
+                    else:
+                        # Row value changed between SELECT and UPDATE; don't
+                        # touch it — operator can re-run for a fresh scan.
+                        skipped_count += 1
         except Exception:
-            conn.rollback()
             raise
     else:
         for _, raw in candidates:
@@ -125,7 +123,7 @@ def normalize(
             else:
                 updated_count += 1
 
-    after = _version_distribution(db) if not dry_run else _projected_after(before)
+    after = _version_distribution(db) if not dry_run else _projected_after(before, candidates)
 
     return {
         "mode": "dry-run" if dry_run else "apply",
@@ -139,18 +137,21 @@ def normalize(
     }
 
 
-def _projected_after(before: dict[str, int]) -> dict[str, int]:
+def _projected_after(before: dict[str, int], candidates: list[tuple[str, str]]) -> dict[str, int]:
     """Project the post-apply distribution for dry-run reporting.
 
-    Only collapses legacy ``<model>/text-v1`` keys into their cleaned
-    form; bare keys are left untouched. `--limit` is not reflected
-    here, since the dry-run audit is about the whole table's prospective
-    state rather than a partial-batch simulation.
+    Reflects the exact changes that would be made to the candidates,
+    so that `--limit` causes a consistent partial projection.
     """
-    projected: Counter[str] = Counter()
-    for version, n in before.items():
-        projected[_clean(version)] += n
-    return dict(projected)
+    projected = dict(before)
+    for _, raw in candidates:
+        clean_value = _clean(raw)
+        if clean_value != raw:
+            projected[raw] -= 1
+            projected[clean_value] = projected.get(clean_value, 0) + 1
+            if projected[raw] == 0:
+                del projected[raw]
+    return projected
 
 
 def _print_report(report: dict[str, Any]) -> None:

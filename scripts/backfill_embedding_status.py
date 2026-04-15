@@ -74,6 +74,7 @@ _SAMPLE_LIMIT = 10
 class Category(str, Enum):
     PASS = "pass"
     NEUTRAL_METADATA_ABSENT = "neutral_metadata_absent"
+    ANOMALY_PARTIAL_METADATA = "anomaly_partial_metadata"
     ANOMALY_CACHE_MISSING = "anomaly_cache_missing"
     FAIL_PAYLOAD_UNREADABLE = "fail_payload_unreadable"
     FAIL_PAYLOAD_IDENTITY_MISMATCH = "fail_payload_identity_mismatch"
@@ -88,6 +89,7 @@ class Klass(str, Enum):
 _CATEGORY_CLASS: dict[Category, Klass] = {
     Category.PASS: Klass.NORMAL,
     Category.NEUTRAL_METADATA_ABSENT: Klass.NORMAL,
+    Category.ANOMALY_PARTIAL_METADATA: Klass.ANOMALY,
     Category.ANOMALY_CACHE_MISSING: Klass.ANOMALY,
     Category.FAIL_PAYLOAD_UNREADABLE: Klass.HARD_FAIL,
     Category.FAIL_PAYLOAD_IDENTITY_MISMATCH: Klass.HARD_FAIL,
@@ -152,7 +154,7 @@ def _classify_row(
         # re-embed on the next run.
         if _row_is_fully_blank(row):
             return Category.NEUTRAL_METADATA_ABSENT
-        return Category.NEUTRAL_METADATA_ABSENT
+        return Category.ANOMALY_PARTIAL_METADATA
 
     key = (row["show_id"], row_identity)
     if key not in cache_by_key:
@@ -219,9 +221,10 @@ def classify_all(
 
 def _metadata_complete_count(counts: Counter) -> int:
     """CT1 denominator: rows where metadata was complete enough to form
-    an identity (i.e. everything except `neutral_metadata_absent`)."""
+    an identity (i.e. everything except neutral and partial metadata)."""
     return sum(
-        v for k, v in counts.items() if k != Category.NEUTRAL_METADATA_ABSENT.value
+        v for k, v in counts.items() 
+        if k not in (Category.NEUTRAL_METADATA_ABSENT.value, Category.ANOMALY_PARTIAL_METADATA.value)
     )
 
 
@@ -269,6 +272,7 @@ def _print_report(report: dict[str, Any]) -> None:
     for k in (
         Category.PASS.value,
         Category.NEUTRAL_METADATA_ABSENT.value,
+        Category.ANOMALY_PARTIAL_METADATA.value,
         Category.ANOMALY_CACHE_MISSING.value,
         Category.FAIL_PAYLOAD_UNREADABLE.value,
         Category.FAIL_PAYLOAD_IDENTITY_MISMATCH.value,
