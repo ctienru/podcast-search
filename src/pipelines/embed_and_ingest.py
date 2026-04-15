@@ -66,7 +66,14 @@ from tqdm import tqdm
 
 from src.config import settings
 from src.embedding.backend import EmbeddingBackend, LocalEmbeddingBackend
+from src.pipelines.embedding_identity import (
+    EmbeddingDimensionContractViolation,
+    EmbeddingIdentity,
+    resolve_expected_identity,
+)
+from src.pipelines.embedding_paths import cache_path_for, validate_cache_identity
 from src.pipelines.exceptions import CacheMissError
+from src.pipelines.show_rebuild import ShowRebuildResult, rebuild_show_cache
 from src.search.routing import IndexRoutingStrategy, LanguageSplitRoutingStrategy
 from src.services.es_service import ElasticsearchService
 from src.storage.base import StorageBase
@@ -185,6 +192,19 @@ class EmbedAndIngestPipeline:
         self._cache_hits: int = 0
         self._cache_misses: int = 0
 
+        # Phase 2a per-show cache outcome counters — populated during
+        # _load_vector_cache when from_cache=True. Each candidate show lands
+        # in exactly one of {cache_hit, cache_miss, cache_identity_mismatch}
+        # plus an overlapping fallback_rebuild count = miss + mismatch.
+        self._cache_hit_count: int = 0
+        self._cache_miss_count: int = 0
+        self._cache_identity_mismatch_count: int = 0
+        self._fallback_rebuild_count: int = 0
+        # Per-show rebuild outcomes — kept for the upcoming per-show DB
+        # metadata commit (populated but not yet consumed in this batch).
+        self._rebuild_results: Dict[str, ShowRebuildResult] = {}
+        self._rebuild_failures: list[Dict] = []
+
     def _load_show_cache(self) -> None:
         """Pre-load show data from SQLiteStorage into memory.
 
@@ -241,18 +261,34 @@ class EmbedAndIngestPipeline:
         logger.debug("cleaned_episode_cache_loaded", extra={"count": loaded})
 
     def _load_vector_cache(self) -> None:
-        """Load pre-computed embedding vectors from disk (used with from_cache=True).
+        """Load pre-computed embedding vectors from the versioned cache layout.
 
-        Reads data/embeddings/<show_id>.json files and populates self._vector_cache.
-        Shows whose cache file is missing are logged as warnings; their episodes will
-        be ingested without a vector (BM25-only update path in to_es_doc).
+        Per-show flow (Phase 2a §4.1):
+          1. Resolve the expected identity for the show's language.
+          2. Look up the versioned cache path; if missing, count a cache_miss
+             and fall back to `rebuild_show_cache` (when a backend is available).
+          3. If the cache exists, validate its identity against the expected.
+             On match: count a cache_hit and populate `self._vector_cache`.
+             On mismatch: count it, log a drift event, and fall back to
+             `rebuild_show_cache`.
+          4. `rebuild_show_cache` raises `EmbeddingDimensionContractViolation`
+             for dimension violations — that propagates out of this method
+             and halts the pipeline (systemic halt).
+
+        Counters land exclusively in one bucket per show:
+          cache_hit_count / cache_miss_count / cache_identity_mismatch_count.
+        `fallback_rebuild_count` overlaps (miss + mismatch for shows where
+        rebuild was attempted).
+
+        Shows whose cache could not be loaded or rebuilt are logged but do
+        not stop the load — their episodes will simply have no vectors
+        (BM25-only update path in `to_es_doc`), matching pre-Phase-2a
+        behavior.
         """
-        if not self._cache_dir.exists():
-            logger.warning("embedding_cache_dir_not_found", extra={"path": str(self._cache_dir)})
-            return
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
 
+        rebuild_supported = self._embedding_backend is not None
         loaded_episodes = 0
-        missing_shows = 0
         show_ids = (
             self.allowed_show_ids
             if self.allowed_show_ids is not None
@@ -264,28 +300,156 @@ class EmbedAndIngestPipeline:
         )
 
         for show_id in show_ids:
-            cache_file = self._cache_dir / f"{show_id}.json"
-            if not cache_file.exists():
-                logger.warning("embedding_cache_missing", extra={"show_id": show_id})
-                missing_shows += 1
+            identity_and_lang = self._resolve_identity_for_show(show_id)
+            if identity_and_lang is None:
+                logger.warning(
+                    "cache_identity_unresolvable",
+                    extra={"show_id": show_id},
+                )
                 continue
+            identity, language = identity_and_lang
+
+            cache_path = cache_path_for(self._cache_dir, identity, show_id)
+
+            entry: Optional[Dict] = None
+            rebuild_reason: Optional[str] = None
+
+            if not cache_path.exists():
+                self._cache_miss_count += 1
+                rebuild_reason = "cache_miss"
+            else:
+                try:
+                    with open(cache_path, encoding="utf-8") as fh:
+                        entry = json.load(fh)
+                except Exception as exc:  # noqa: BLE001 — unreadable file = treat as miss
+                    logger.warning(
+                        "embedding_cache_load_failed",
+                        extra={"show_id": show_id, "error": repr(exc)},
+                    )
+                    self._cache_miss_count += 1
+                    rebuild_reason = "cache_miss"
+                    entry = None
+
+                if entry is not None:
+                    mismatch = validate_cache_identity(entry, identity)
+                    if mismatch is None:
+                        # Cache hit — three prohibitions: no cache rewrite, no
+                        # DB metadata update, no runtime call. Just read.
+                        self._cache_hit_count += 1
+                        for episode_id, vector in (entry.get("episodes") or {}).items():
+                            self._vector_cache[episode_id] = vector
+                            loaded_episodes += 1
+                    else:
+                        self._cache_identity_mismatch_count += 1
+                        logger.warning(
+                            "cache_identity_mismatch_detected",
+                            extra={
+                                "show_id": show_id,
+                                "drift_kind": mismatch.drift_kind.value,
+                                "found_parse_state": mismatch.found_parse_state.value,
+                                "expected_model": mismatch.expected_model,
+                                "expected_version": mismatch.expected_version,
+                                "expected_dims": mismatch.expected_dims,
+                                "found_model": mismatch.found_model,
+                                "found_version": mismatch.found_version,
+                                "found_dims": mismatch.found_dims,
+                                "vector_length_observed": mismatch.vector_length_observed,
+                            },
+                        )
+                        rebuild_reason = "identity_mismatch"
+
+            if rebuild_reason is None:
+                continue  # cache hit path — nothing more to do for this show
+
+            if not rebuild_supported:
+                # BM25-only + from_cache=True with no usable cache — skip this
+                # show's vectors; caller opted out of having a backend.
+                logger.warning(
+                    "cache_fallback_rebuild_skipped_no_backend",
+                    extra={"show_id": show_id, "reason": rebuild_reason},
+                )
+                continue
+
+            self._fallback_rebuild_count += 1
+            rebuild_result = rebuild_show_cache(
+                show_id=show_id,
+                identity=identity,
+                language=language,
+                cache_dir=self._cache_dir,
+                embedding_input_dir=self.EMBEDDING_INPUT_DIR,
+                backend=self._embedding_backend,
+            )
+
+            if rebuild_result.status == "failed":
+                self._rebuild_failures.append({
+                    "show_id": show_id,
+                    "error_code": rebuild_result.error_code,
+                    "error_message": rebuild_result.error_message,
+                    "rebuild_reason": rebuild_reason,
+                })
+                logger.warning(
+                    "cache_fallback_rebuild_failed",
+                    extra={
+                        "show_id": show_id,
+                        "error_code": rebuild_result.error_code,
+                        "reason": rebuild_reason,
+                    },
+                )
+                continue
+
+            # Track the successful rebuild for the upcoming per-show DB
+            # metadata commit (consumed in a later batch).
+            self._rebuild_results[show_id] = rebuild_result
+
+            # Re-read the freshly-written versioned cache to populate the
+            # in-memory vector cache. Re-reading is the simplest way to keep
+            # this method the single source of truth for vector population.
             try:
-                with open(cache_file, encoding="utf-8") as f:
-                    entry = json.load(f)
-                for episode_id, vector in entry.get("episodes", {}).items():
+                with open(cache_path, encoding="utf-8") as fh:
+                    fresh = json.load(fh)
+                for episode_id, vector in (fresh.get("episodes") or {}).items():
                     self._vector_cache[episode_id] = vector
                     loaded_episodes += 1
-            except Exception as e:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "embedding_cache_load_failed",
-                    extra={"show_id": show_id, "error": str(e)},
+                    "cache_fallback_post_read_failed",
+                    extra={"show_id": show_id, "error": repr(exc)},
                 )
-                missing_shows += 1
 
         logger.info(
             "vector_cache_loaded",
-            extra={"episodes": loaded_episodes, "missing_shows": missing_shows},
+            extra={
+                "episodes": loaded_episodes,
+                "cache_hit_count": self._cache_hit_count,
+                "cache_miss_count": self._cache_miss_count,
+                "cache_identity_mismatch_count": self._cache_identity_mismatch_count,
+                "fallback_rebuild_count": self._fallback_rebuild_count,
+                "rebuild_failures": len(self._rebuild_failures),
+            },
         )
+
+    def _resolve_identity_for_show(
+        self, show_id: str,
+    ) -> Optional[tuple[EmbeddingIdentity, Language]]:
+        """Return (identity, language) for a show, or None when unresolvable.
+
+        Language is read from the show's target_index (the primary routing
+        truth). Falls back to the cleaned episode cache when the show is not
+        present in the show cache (e.g. allowed_show_ids contains IDs not in
+        the current window).
+        """
+        show = self._show_cache.get(show_id)
+        target_index = show.get("target_index") if show else None
+        language = _language_from_target_index(target_index or "")
+        if language is None:
+            for ep in self._cleaned_episode_cache.values():
+                if ep.get("show_id") == show_id:
+                    language = _language_from_target_index(ep.get("target_index", ""))
+                    if language is not None:
+                        break
+        if language is None:
+            return None
+        return resolve_expected_identity(language=language), language
 
     def _get_show_data(self, show_id: str) -> Optional[Dict]:
         """Get show data from cache."""
@@ -699,6 +863,12 @@ class EmbedAndIngestPipeline:
             "docs_per_sec": round(success / elapsed, 2) if elapsed > 0 else 0,
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
+            # Phase 2a per-show cache outcome counters (§3.7 RA1–RA4).
+            "cache_hit_count": self._cache_hit_count,
+            "cache_miss_count": self._cache_miss_count,
+            "cache_identity_mismatch_count": self._cache_identity_mismatch_count,
+            "fallback_rebuild_count": self._fallback_rebuild_count,
+            "rebuild_failures": len(self._rebuild_failures),
         }
         if self._cache_misses > 0:
             logger.warning(
